@@ -6,7 +6,7 @@ import type { BuilderProject, BuilderFile, BuilderMessage } from '@/types/builde
 import { buildSrcdoc } from '@/lib/builder/preview'
 import {
   ChevronLeft, Send, Loader2, Globe, Rocket, Plus, FileText,
-  Code2, Eye, PanelLeft, LayoutTemplate, ExternalLink, RefreshCw, X
+  Code2, Eye, PanelLeft, LayoutTemplate, ExternalLink, RefreshCw, X, ImagePlus
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -34,6 +34,8 @@ export default function EditorPage() {
   const [deployStatus, setDeployStatus] = useState<string | null>(null)
   const [showDeploy, setShowDeploy] = useState(false)
   const [previewKey, setPreviewKey] = useState(0)
+  const [uploadedImage, setUploadedImage] = useState<{ base64: string; mediaType: string } | null>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
 
   const chatBottomRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<NodeJS.Timeout | null>(null)
@@ -78,10 +80,24 @@ export default function EditorPage() {
     if (data) setMessages(data)
   }
 
+  function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      const base64 = result.split(',')[1]
+      setUploadedImage({ base64, mediaType: file.type as 'image/png' | 'image/jpeg' | 'image/webp' })
+    }
+    reader.readAsDataURL(file)
+  }
+
   async function sendPrompt() {
-    if (!prompt.trim() || generating) return
-    const userPrompt = prompt
+    if ((!prompt.trim() && !uploadedImage) || generating) return
+    const userPrompt = prompt || 'Recreate this website design'
+    const imageToSend = uploadedImage
     setPrompt('')
+    setUploadedImage(null)
     setGenerating(true)
     setStreamText('')
 
@@ -104,7 +120,7 @@ export default function EditorPage() {
       const res = await fetch('/api/builder/ai/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, prompt: userPrompt, conversationHistory: history }),
+        body: JSON.stringify({ projectId, prompt: userPrompt, conversationHistory: history, image: imageToSend }),
       })
 
       const reader = res.body?.getReader()
@@ -500,6 +516,13 @@ export default function EditorPage() {
 
             {/* Input */}
             <div className="p-3 border-t border-[#30363d]">
+              {uploadedImage && (
+                <div className="mb-2 flex items-center gap-2 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2">
+                  <img src={`data:${uploadedImage.mediaType};base64,${uploadedImage.base64}`} className="h-10 w-10 object-cover rounded" />
+                  <span className="text-xs text-gray-400 flex-1">Screenshot attached</span>
+                  <button onClick={() => setUploadedImage(null)} className="text-gray-500 hover:text-white"><X size={14} /></button>
+                </div>
+              )}
               <div className="flex gap-2">
                 <textarea
                   value={prompt}
@@ -510,13 +533,23 @@ export default function EditorPage() {
                   className="flex-1 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-[#22c55e] focus:outline-none resize-none"
                   disabled={generating}
                 />
-                <button
-                  onClick={sendPrompt}
-                  disabled={generating || !prompt.trim()}
-                  className="self-end p-2 bg-[#22c55e] hover:bg-[#16a34a] text-black rounded-lg transition-colors disabled:opacity-50"
-                >
-                  {generating ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-                </button>
+                <div className="flex flex-col gap-1 self-end">
+                  <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+                  <button
+                    onClick={() => imageInputRef.current?.click()}
+                    title="Upload screenshot"
+                    className="p-2 text-gray-400 hover:text-[#22c55e] bg-[#161b22] border border-[#30363d] rounded-lg transition-colors"
+                  >
+                    <ImagePlus size={16} />
+                  </button>
+                  <button
+                    onClick={sendPrompt}
+                    disabled={generating || (!prompt.trim() && !uploadedImage)}
+                    className="p-2 bg-[#22c55e] hover:bg-[#16a34a] text-black rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {generating ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                  </button>
+                </div>
               </div>
               <p className="text-[10px] text-gray-600 mt-1.5 text-center">Enter to send · Shift+Enter for new line</p>
             </div>

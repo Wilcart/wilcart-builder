@@ -1,7 +1,16 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { createClient as createServerClient } from '@/lib/supabase/server'
+import { createClient } from '@supabase/supabase-js'
 import { streamGenerate, parseFileBlocks } from '@/lib/builder/claude'
 import { checkBuilderAccess } from '@/lib/builder/access'
+
+// Service role client bypasses RLS for file operations
+function createAdminClient() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 export async function POST(req: Request) {
   const access = await checkBuilderAccess()
@@ -10,8 +19,11 @@ export async function POST(req: Request) {
 
   const { projectId, prompt, conversationHistory = [], image } = await req.json()
 
+  // Use admin client for file reads/writes to bypass RLS
+  const admin = createAdminClient()
+
   // Load project files
-  const { data: files } = await supabase
+  const { data: files } = await admin
     .from('builder_files')
     .select('*')
     .eq('project_id', projectId)
@@ -44,14 +56,14 @@ export async function POST(req: Request) {
           // Find existing file by path
           const existing = (files ?? []).find(f => f.path === block.path)
           if (existing) {
-            await supabase
+            await admin
               .from('builder_files')
-              .update({ content: block.content, size_bytes: block.content.length })
+              .update({ content: block.content, size_bytes: block.content.length, updated_at: new Date().toISOString() })
               .eq('id', existing.id)
             updatedFileIds.push(existing.id)
           } else {
             // Create new file
-            const { data: newFile } = await supabase
+            const { data: newFile } = await admin
               .from('builder_files')
               .insert({
                 project_id: projectId,

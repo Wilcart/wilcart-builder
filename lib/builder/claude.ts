@@ -38,10 +38,18 @@ export function parseFileBlocks(text: string): FileBlock[] {
     blocks.push({ path: match[1].trim(), content: match[2].trim() })
   }
 
-  // Fallback: if no file blocks found but response contains HTML, wrap it
+  // Fallback 1: unclosed <file> tag (response was cut off before </file>)
   if (blocks.length === 0) {
-    const htmlMatch = text.match(/<!DOCTYPE html[\s\S]*<\/html>/i) ||
-                      text.match(/<html[\s\S]*<\/html>/i) ||
+    const openMatch = text.match(/<file path="([^"]+)">([\s\S]+)/)
+    if (openMatch) {
+      blocks.push({ path: openMatch[1].trim(), content: openMatch[2].trim() })
+    }
+  }
+
+  // Fallback 2: raw HTML without file tags
+  if (blocks.length === 0) {
+    const htmlMatch = text.match(/<!DOCTYPE html[\s\S]*/i) ||
+                      text.match(/<html[\s\S]*/i) ||
                       text.match(/```html\n?([\s\S]*?)\n?```/)
     if (htmlMatch) {
       const content = htmlMatch[1] ?? htmlMatch[0]
@@ -89,7 +97,7 @@ export async function* streamGenerate(
 
   const stream = anthropic.messages.stream({
     model: 'claude-sonnet-4-6',
-    max_tokens: 8192,
+    max_tokens: 16000,
     system: SYSTEM_PROMPT,
     messages,
   })

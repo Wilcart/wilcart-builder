@@ -1,5 +1,13 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { createClient as createAdmin } from '@supabase/supabase-js'
+
+function adminClient() {
+  return createAdmin(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 export async function GET(_req: Request, { params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params
@@ -7,7 +15,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ project
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { data, error } = await supabase
+  const admin = adminClient()
+  const { data, error } = await admin
     .from('builder_projects')
     .select('*')
     .eq('id', projectId)
@@ -30,7 +39,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ projec
     if (key in body) updates[key] = body[key]
   }
 
-  const { data, error } = await supabase
+  const admin = adminClient()
+  const { data, error } = await admin
     .from('builder_projects')
     .update(updates)
     .eq('id', projectId)
@@ -47,7 +57,8 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ proj
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { error } = await supabase
+  const admin = adminClient()
+  const { error } = await admin
     .from('builder_projects')
     .update({ deleted_at: new Date().toISOString() })
     .eq('id', projectId)

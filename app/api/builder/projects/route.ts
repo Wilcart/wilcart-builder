@@ -1,7 +1,15 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { createClient as createAdmin } from '@supabase/supabase-js'
 import { getMimeType } from '@/lib/builder/preview'
 import { checkBuilderAccess } from '@/lib/builder/access'
+
+function adminClient() {
+  return createAdmin(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 const DEFAULT_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -24,11 +32,13 @@ const DEFAULT_HTML = `<!DOCTYPE html>
 export async function GET() {
   const access = await checkBuilderAccess()
   if (!access.allowed) return access.response
-  const { supabase } = access
+  const { orgId } = access
+  const admin = adminClient()
 
-  const { data, error } = await supabase
+  const { data, error } = await admin
     .from('builder_projects')
     .select('*')
+    .eq('org_id', orgId)
     .is('deleted_at', null)
     .order('created_at', { ascending: false })
 
@@ -39,19 +49,19 @@ export async function GET() {
 export async function POST(req: Request) {
   const access = await checkBuilderAccess()
   if (!access.allowed) return access.response
-  const { user, orgId: org_id, supabase } = access
-  const profile = { org_id }
+  const { user, orgId: org_id } = access
+  const admin = adminClient()
 
   const body = await req.json()
   const { name, description } = body
 
   // Create project
-  const { data: project, error: projectError } = await supabase
+  const { data: project, error: projectError } = await admin
     .from('builder_projects')
     .insert({
       name: name || 'Untitled Project',
       description: description || null,
-      org_id: profile.org_id,
+      org_id,
       created_by: user.id,
     })
     .select()
@@ -60,11 +70,11 @@ export async function POST(req: Request) {
   if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 })
 
   // Create default index.html
-  const { data: file, error: fileError } = await supabase
+  const { data: file, error: fileError } = await admin
     .from('builder_files')
     .insert({
       project_id: project.id,
-      org_id: profile.org_id,
+      org_id,
       path: 'index.html',
       name: 'index.html',
       mime_type: getMimeType('index.html'),
@@ -78,7 +88,7 @@ export async function POST(req: Request) {
   if (fileError) return NextResponse.json({ error: fileError.message }, { status: 500 })
 
   // Set active file
-  await supabase
+  await admin
     .from('builder_projects')
     .update({ active_file_id: file.id })
     .eq('id', project.id)

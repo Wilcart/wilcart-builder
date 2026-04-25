@@ -952,7 +952,7 @@ export default function EditorPage() {
                   <iframe
                     ref={iframeRef}
                     srcDoc={srcdoc}
-                    sandbox="allow-scripts allow-forms allow-popups"
+                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
                     className="w-full h-full border-none bg-white"
                     title="preview"
                   />
@@ -962,7 +962,7 @@ export default function EditorPage() {
                 <iframe
                   ref={iframeRef}
                   srcDoc={srcdoc}
-                  sandbox="allow-scripts allow-forms allow-popups"
+                  sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
                   className="w-full h-full border-none bg-white"
                   title="preview"
                 />

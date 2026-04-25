@@ -395,9 +395,15 @@ export default function EditorPage() {
   // Strip code blocks from message display — show only the human-readable part
   function getDisplayContent(content: string) {
     return content
+      // Complete closed blocks
       .replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '')
       .replace(/<patch>[\s\S]*?<\/patch>/g, '')
       .replace(/<change>[\s\S]*?<\/change>/g, '')
+      // Incomplete/truncated blocks (no closing tag — wipe everything from the opening tag onward)
+      .replace(/<(file|patch|change)\b[^>]*>[\s\S]*/i, '')
+      // Raw HTML fallback (Claude responded without a wrapper tag)
+      .replace(/<!DOCTYPE[\s\S]*/i, '')
+      .replace(/```[\s\S]*/g, '')
       .trim()
   }
 

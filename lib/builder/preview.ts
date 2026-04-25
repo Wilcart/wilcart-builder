@@ -45,7 +45,6 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
   function handleNav(href){
     if(!href)return;
     if(href.startsWith('#')){
-      // in-page scroll
       var el=document.getElementById(href.slice(1));
       if(el)el.scrollIntoView({behavior:'smooth'});
       return;
@@ -59,23 +58,30 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
     if(page)window.parent.postMessage({type:'navigate',page:page},'*');
   }
 
-  // 1. Intercept <a> clicks (capture phase = before any other handler)
+  // 1. Intercept <a> clicks FIRST — before any potentially-throwing code below
   document.addEventListener('click',function(e){
     var a=e.target.closest('a');
     if(!a)return;
     var href=a.getAttribute('href')||'';
-    if(href.startsWith('#'))return; // let in-page anchors work normally
+    if(href.startsWith('#'))return;
     e.preventDefault();
     e.stopImmediatePropagation();
     handleNav(href);
   },true);
 
-  // 2. Block ALL location-based navigation by overriding window.location
-  var _loc={href:window.location.href,pathname:'/',search:'',hash:'',
-    assign:function(u){handleNav(u);},
-    replace:function(u){handleNav(u);},
-    reload:function(){}};
+  // 2. Override window.location — wrap entirely in try/catch so errors don't stop execution
+  // NOTE: do NOT read window.location.href here — it throws SecurityError in sandboxed iframes
   try{
+    var _loc={pathname:'/',search:'',hash:'',
+      assign:function(u){handleNav(String(u));},
+      replace:function(u){handleNav(String(u));},
+      reload:function(){}};
+    // Define href as a setter so window.location.href = 'url' calls handleNav
+    Object.defineProperty(_loc,'href',{
+      get:function(){return'about:srcdoc';},
+      set:function(u){handleNav(String(u));},
+      enumerable:true,configurable:true
+    });
     Object.defineProperty(window,'location',{get:function(){return _loc;},configurable:true});
   }catch(e){}
 
@@ -85,14 +91,27 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
     window.history.replaceState=function(s,t,url){if(url)handleNav(String(url));};
   }catch(e){}
 
-  // 4. Block form submissions that would navigate away
+  // 4. Override window.open — catch _self/_top/_parent targets
+  try{
+    var _origOpen=window.open.bind(window);
+    window.open=function(url,target,features){
+      if(!url)return _origOpen(url,target,features);
+      var t=target||'_blank';
+      if(t==='_self'||t==='_parent'||t==='_top'){handleNav(String(url));return null;}
+      if(!String(url).startsWith('http')&&!String(url).startsWith('//'))
+        {handleNav(String(url));return null;}
+      return _origOpen(url,'_blank','noopener,noreferrer');
+    };
+  }catch(e){}
+
+  // 5. Block form submissions that would navigate away
   document.addEventListener('submit',function(e){
     var form=e.target;
     var action=form&&form.getAttribute('action');
     if(!action||action.startsWith('#')){e.preventDefault();}
   },true);
 
-  // 5. Last-resort: if iframe somehow starts navigating, tell parent to reload srcdoc
+  // 6. Last-resort: if iframe somehow starts navigating, tell parent to reload srcdoc
   window.addEventListener('beforeunload',function(e){
     window.parent.postMessage({type:'reload'},'*');
     e.preventDefault();

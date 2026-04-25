@@ -30,21 +30,41 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
   const navScript = `<script>
 (function(){
   var pages=${JSON.stringify(htmlPages)};
+  function resolveHref(href){
+    if(!href)return null;
+    // Root "/" always means index.html
+    if(href==='/'||href==='./'){return'index.html';}
+    var clean=href.replace(/^\\/+/,'').replace(/\\.html$/,'');
+    // Exact match or with .html suffix
+    for(var i=0;i<pages.length;i++){
+      var p=pages[i];
+      if(p===href||p===href+'.html'||p===clean||p===clean+'.html'){return p;}
+    }
+    return null;
+  }
   document.addEventListener('click',function(e){
     var a=e.target.closest('a[href]');
     if(!a)return;
     var href=a.getAttribute('href')||'';
-    // Allow hash links (smooth scroll within page)
-    if(href.startsWith('#')){return;}
-    // Open external links in new tab
-    if(href.startsWith('http://')||href.startsWith('https://')){a.setAttribute('target','_blank');return;}
-    // Ignore mailto/tel
-    if(href.startsWith('mailto:')||href.startsWith('tel:'))return;
-    // Internal page navigation — send to parent editor
+    // Allow in-page hash links
+    if(href.startsWith('#'))return;
+    // Open truly external links in new tab safely
+    if(href.startsWith('http://')||href.startsWith('https://')){
+      e.preventDefault();
+      window.open(href,'_blank','noopener,noreferrer');
+      return;
+    }
+    // Ignore mailto/tel/javascript
+    if(/^(mailto:|tel:|javascript:)/i.test(href))return;
+    // Block ALL other navigations — prevent white page
     e.preventDefault();
-    var clean=href.replace(/^\\/+/,'').replace(/\\.html$/,'');
-    var match=pages.find(function(p){return p===href||p===href+'.html'||p===clean+'.html'||p===clean;});
-    if(match){window.parent.postMessage({type:'navigate',page:match},'*');}
+    var page=resolveHref(href);
+    if(page){window.parent.postMessage({type:'navigate',page:page},'*');}
+  },true);
+  // Also block form submissions that would navigate away
+  document.addEventListener('submit',function(e){
+    var form=e.target;
+    if(form&&!form.getAttribute('action')){e.preventDefault();}
   },true);
 })();
 </script>`

@@ -410,6 +410,19 @@ export default function EditorPage() {
     }
   }
 
+  // Render basic markdown to safe HTML for chat display
+  function renderMarkdown(text: string): string {
+    return text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1 rounded text-xs font-mono">$1</code>')
+      .replace(/^#{1,3}\s+(.+)$/gm, '<span class="block font-semibold text-white mt-1">$1</span>')
+      .replace(/^[\-\*]\s+(.+)$/gm, '<span class="flex gap-1.5 mt-0.5"><span class="text-[#22c55e] flex-shrink-0">•</span><span>$1</span></span>')
+      .replace(/\n\n/g, '<br/><br/>')
+      .replace(/\n/g, '<br/>')
+  }
+
   // Strip code blocks from message display — show only the human-readable part
   function getDisplayContent(content: string) {
     return content
@@ -681,7 +694,11 @@ export default function EditorPage() {
                           : 'bg-white/[0.04] text-gray-300 border border-white/[0.06] rounded-tl-sm'
                       )}
                     >
-                      {displayContent || (
+                      {displayContent ? (
+                        isUser ? displayContent : (
+                          <span dangerouslySetInnerHTML={{ __html: renderMarkdown(displayContent) }} />
+                        )
+                      ) : (
                         <span className="flex items-center gap-1.5 text-[#22c55e] text-xs">
                           <span className="w-1.5 h-1.5 bg-[#22c55e] rounded-full" />
                           Website updated
@@ -935,7 +952,7 @@ export default function EditorPage() {
                   <iframe
                     ref={iframeRef}
                     srcDoc={srcdoc}
-                    sandbox="allow-scripts allow-forms allow-same-origin"
+                    sandbox="allow-scripts allow-forms allow-popups"
                     className="w-full h-full border-none bg-white"
                     title="preview"
                   />
@@ -945,7 +962,7 @@ export default function EditorPage() {
                 <iframe
                   ref={iframeRef}
                   srcDoc={srcdoc}
-                  sandbox="allow-scripts allow-forms allow-same-origin"
+                  sandbox="allow-scripts allow-forms allow-popups"
                   className="w-full h-full border-none bg-white"
                   title="preview"
                 />

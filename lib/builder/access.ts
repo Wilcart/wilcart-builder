@@ -1,10 +1,14 @@
 import { createClient } from '@/lib/supabase/server'
+import { createClient as createAdmin } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
-/**
- * Check if the current user's org has builder access.
- * Returns { allowed: true, user, orgId } or { allowed: false, response }
- */
+function adminClient() {
+  return createAdmin(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
+
 export async function checkBuilderAccess() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -29,7 +33,8 @@ export async function checkBuilderAccess() {
     }
   }
 
-  const { data: org } = await supabase
+  const admin = adminClient()
+  const { data: org } = await admin
     .from('organizations')
     .select('builder_enabled')
     .eq('id', profile.org_id)

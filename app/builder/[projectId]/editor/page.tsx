@@ -3,16 +3,28 @@ import { useEffect, useState, useRef } from 'react'
 import dynamic from 'next/dynamic'
 import { useParams, useRouter } from 'next/navigation'
 import type { BuilderProject, BuilderFile, BuilderMessage } from '@/types/builder'
+import type { FileBlock } from '@/lib/builder/claude'
 import { buildSrcdoc } from '@/lib/builder/preview'
 import {
   ChevronLeft, Send, Loader2, Globe, Rocket, Plus, FileText,
-  Code2, Eye, PanelLeft, LayoutTemplate, ExternalLink, RefreshCw, X, ImagePlus
+  Code2, Eye, ExternalLink, RefreshCw, X, ImagePlus, Sparkles,
+  Monitor, Smartphone, Tablet, MoreHorizontal, Wand2, Undo2, History
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false })
 
-type TabView = 'code' | 'preview' | 'split'
+type ViewMode = 'preview' | 'code'
+type DeviceSize = 'desktop' | 'tablet' | 'mobile'
+
+const SUGGESTIONS = [
+  '🔧 Create a plumber service website',
+  '🍕 Make a modern restaurant landing page',
+  '✨ Build a cleaning company homepage',
+  '⚡ Design an electrician business site',
+  '🌿 Landscaping company website',
+  '🏠 Moving company landing page',
+]
 
 export default function EditorPage() {
   const params = useParams()
@@ -26,19 +38,31 @@ export default function EditorPage() {
   const [prompt, setPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
   const [streamText, setStreamText] = useState('')
-  const [tab, setTab] = useState<TabView>('split')
-  const [showChat, setShowChat] = useState(true)
-  const [showFiles, setShowFiles] = useState(true)
+  const [viewMode, setViewMode] = useState<ViewMode>('preview')
+  const [deviceSize, setDeviceSize] = useState<DeviceSize>('desktop')
   const [deploying, setDeploying] = useState(false)
   const [deployUrl, setDeployUrl] = useState<string | null>(null)
   const [deployStatus, setDeployStatus] = useState<string | null>(null)
   const [showDeploy, setShowDeploy] = useState(false)
   const [previewKey, setPreviewKey] = useState(0)
   const [uploadedImage, setUploadedImage] = useState<{ base64: string; mediaType: string } | null>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
+  const [showFiles, setShowFiles] = useState(false)
+  const [dotCount, setDotCount] = useState(1)
+  // Version history — snapshots before each AI generation (last 10)
+  const [fileHistory, setFileHistory] = useState<Array<{ files: BuilderFile[]; label: string }>>([])
+  const [showHistory, setShowHistory] = useState(false)
 
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const chatBottomRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<NodeJS.Timeout | null>(null)
+  const dotRef = useRef<NodeJS.Timeout | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  // Keep a live ref to files so async callbacks always have the latest value
+  const filesRef = useRef<BuilderFile[]>([])
+
+  // Keep filesRef in sync so async stream callbacks always see latest files
+  useEffect(() => { filesRef.current = files }, [files])
 
   useEffect(() => {
     loadProject()
@@ -48,6 +72,17 @@ export default function EditorPage() {
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamText])
+
+  // Animate dots while generating
+  useEffect(() => {
+    if (generating) {
+      dotRef.current = setInterval(() => setDotCount(d => d === 3 ? 1 : d + 1), 500)
+    } else {
+      if (dotRef.current) clearInterval(dotRef.current)
+      setDotCount(1)
+    }
+    return () => { if (dotRef.current) clearInterval(dotRef.current) }
+  }, [generating])
 
   async function loadProject() {
     const res = await fetch(`/api/builder/projects/${projectId}`)
@@ -83,13 +118,29 @@ export default function EditorPage() {
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = reader.result as string
-      const base64 = result.split(',')[1]
-      setUploadedImage({ base64, mediaType: file.type as 'image/png' | 'image/jpeg' | 'image/webp' })
+
+    const img = new Image()
+    const objectUrl = URL.createObjectURL(file)
+
+    img.onload = () => {
+      // Resize to max 1024px on longest side — keeps payload well under 1MB
+      const MAX = 1024
+      let { width, height } = img
+      if (width > MAX || height > MAX) {
+        if (width > height) { height = Math.round(height * MAX / width); width = MAX }
+        else { width = Math.round(width * MAX / height); height = MAX }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      canvas.getContext('2d')!.drawImage(img, 0, 0, width, height)
+      // JPEG at 85% quality — sharp enough for AI, small enough to send
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+      setUploadedImage({ base64: dataUrl.split(',')[1], mediaType: 'image/jpeg' })
+      URL.revokeObjectURL(objectUrl)
     }
-    reader.readAsDataURL(file)
+
+    img.src = objectUrl
   }
 
   async function sendPrompt() {
@@ -100,6 +151,14 @@ export default function EditorPage() {
     setUploadedImage(null)
     setGenerating(true)
     setStreamText('')
+
+    // Save snapshot BEFORE generation so user can revert
+    if (filesRef.current.some(f => f.content && f.content.length > 500)) {
+      setFileHistory(prev => [
+        ...prev.slice(-9),
+        { files: filesRef.current.map(f => ({ ...f })), label: userPrompt.slice(0, 50) },
+      ])
+    }
 
     const userMsg: BuilderMessage = {
       id: crypto.randomUUID(),
@@ -114,7 +173,14 @@ export default function EditorPage() {
     }
     setMessages(prev => [...prev, userMsg])
 
-    const history = messages.slice(-10).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    // IMPORTANT: Strip <file> blocks from history to avoid context overload
+    // This is why follow-up prompts were failing — sending 16000 tokens of HTML each time
+    const history = messages.slice(-10).map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.role === 'assistant'
+        ? m.content.replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '[website code updated]').replace(/```[\s\S]*?```/g, '[code block]').trim()
+        : m.content,
+    }))
 
     try {
       const res = await fetch('/api/builder/ai/generate', {
@@ -122,6 +188,19 @@ export default function EditorPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId, prompt: userPrompt, conversationHistory: history, image: imageToSend }),
       })
+
+      // Show HTTP-level errors in chat (not just console)
+      if (!res.ok && res.status !== 200) {
+        let errText = `Server error ${res.status}`
+        try { const j = await res.json(); errText = j.error ?? j.message ?? errText } catch {}
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+          content: `❌ ${errText}`, affected_file_ids: null, input_tokens: null, output_tokens: null,
+          created_at: new Date().toISOString(),
+        }])
+        setGenerating(false)
+        return
+      }
 
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
@@ -153,8 +232,29 @@ export default function EditorPage() {
                 created_at: new Date().toISOString(),
               }
               setMessages(prev => [...prev, assistantMsg])
-              await loadFiles()
-              setPreviewKey(k => k + 1)
+
+              if (data.fileBlocks && data.fileBlocks.length > 0) {
+                // Build updated files array from latest ref (avoids stale closure)
+                const updatedFiles = filesRef.current.map((f: BuilderFile) => {
+                  const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
+                  return match ? { ...f, content: match.content } : f
+                })
+
+                // ✅ DIRECT DOM update — bypasses React render cycle entirely
+                // This is what makes the preview update instantly without page reload
+                const newSrcdoc = buildSrcdoc(updatedFiles)
+                if (iframeRef.current) {
+                  iframeRef.current.srcdoc = newSrcdoc
+                }
+
+                // Sync React state for code editor / file list consistency
+                setFiles(updatedFiles)
+                setActiveFile(prev => {
+                  if (!prev) return prev
+                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
+                  return match ? { ...prev, content: match.content } : prev
+                })
+              }
             } else if (data.type === 'error') {
               setStreamText('')
               const errMsg: BuilderMessage = {
@@ -180,6 +280,22 @@ export default function EditorPage() {
     setGenerating(false)
   }
 
+  function revertTo(index: number) {
+    const snapshot = fileHistory[index]
+    if (!snapshot) return
+    // Restore files
+    setFiles(snapshot.files)
+    if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(snapshot.files)
+    setActiveFile(prev => {
+      if (!prev) return prev
+      return snapshot.files.find(f => f.id === prev.id) ?? prev
+    })
+    filesRef.current = snapshot.files
+    // Trim history to before this snapshot
+    setFileHistory(prev => prev.slice(0, index))
+    setShowHistory(false)
+  }
+
   async function saveFileContent(content: string) {
     if (!activeFile) return
     await fetch(`/api/builder/files/${projectId}/${activeFile.id}`, {
@@ -194,11 +310,12 @@ export default function EditorPage() {
   async function deploy() {
     setDeploying(true)
     setDeployStatus('in_progress')
+    setShowDeploy(false)
     try {
       const res = await fetch(`/api/builder/deploy/${projectId}`, { method: 'POST' })
       if (!res.ok) throw new Error('Deploy failed')
       pollDeployStatus()
-    } catch (err) {
+    } catch {
       setDeployStatus('error')
       setDeploying(false)
     }
@@ -233,162 +350,479 @@ export default function EditorPage() {
     }
   }
 
+  // Strip <file> blocks from message display
+  function getDisplayContent(content: string) {
+    return content.replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '').trim()
+  }
+
   const srcdoc = buildSrcdoc(files)
 
-  const deployStatusColor = {
-    ready: 'text-[#22c55e]',
-    in_progress: 'text-blue-400',
-    error: 'text-red-400',
-    pending: 'text-gray-400',
-    cancelled: 'text-gray-400',
-  }[deployStatus ?? 'pending'] ?? 'text-gray-400'
+  const previewWidth = {
+    desktop: '100%',
+    tablet: '768px',
+    mobile: '390px',
+  }[deviceSize]
 
   return (
-    <div className="h-screen bg-[#0d1117] flex flex-col overflow-hidden">
-      {/* Top bar */}
-      <header className="flex items-center gap-3 px-4 py-2.5 border-b border-[#30363d] flex-shrink-0">
-        <button onClick={() => router.push('/builder')} className="p-1.5 text-gray-400 hover:text-white rounded">
-          <ChevronLeft size={18} />
+    <div className="h-screen bg-[#0a0a0f] flex flex-col overflow-hidden font-sans">
+      {/* Top Navigation Bar */}
+      <header className="h-12 flex items-center gap-3 px-4 border-b border-white/[0.06] flex-shrink-0 bg-[#0d0d14]">
+        {/* Back + Logo + Project */}
+        <button
+          onClick={() => router.push('/builder')}
+          className="flex items-center gap-1.5 text-gray-500 hover:text-white transition-colors group"
+        >
+          <ChevronLeft size={16} className="group-hover:-translate-x-0.5 transition-transform" />
         </button>
 
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <img src="/logo.png" alt="Wilcart" className="h-6 w-auto flex-shrink-0" />
-          <span className="text-white font-semibold text-sm truncate">{project?.name ?? 'Loading...'}</span>
+        <div className="flex items-center gap-2 min-w-0">
+          <img src="/logo.png" alt="Wilcart" className="h-5 w-auto flex-shrink-0" />
+          <span className="text-white/80 font-medium text-sm truncate max-w-[160px]">
+            {project?.name ?? 'Loading...'}
+          </span>
         </div>
 
-        {/* Tab switcher */}
-        <div className="flex bg-[#161b22] border border-[#30363d] rounded-lg p-0.5 gap-0.5">
-          {(['code', 'split', 'preview'] as TabView[]).map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={cn(
-                'px-3 py-1 rounded text-xs font-medium transition-colors',
-                tab === t ? 'bg-[#22c55e] text-black' : 'text-gray-400 hover:text-white'
-              )}
-            >
-              {t === 'code' ? <Code2 size={14} /> : t === 'preview' ? <Eye size={14} /> : <LayoutTemplate size={14} />}
-            </button>
-          ))}
-        </div>
+        <div className="h-4 w-px bg-white/10 mx-1" />
 
-        {/* Deploy */}
-        <div className="flex items-center gap-2">
+        {/* View mode tabs */}
+        <div className="flex items-center gap-1 bg-white/5 rounded-lg p-0.5">
           <button
-            onClick={() => router.push(`/builder/${projectId}/domains`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-400 hover:text-white border border-[#30363d] hover:border-[#22c55e]/50 rounded-lg transition-colors"
-          >
-            <Globe size={14} /> Domains
-          </button>
-
-          {deployUrl && (
-            <a href={deployUrl} target="_blank" rel="noreferrer"
-              className="flex items-center gap-1 text-xs text-[#22c55e] hover:underline">
-              <ExternalLink size={12} /> Live
-            </a>
-          )}
-          <button
-            onClick={() => setShowDeploy(!showDeploy)}
+            onClick={() => setViewMode('preview')}
             className={cn(
-              'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors',
-              deploying
-                ? 'bg-blue-500/20 text-blue-400 cursor-wait'
-                : 'bg-[#22c55e] hover:bg-[#16a34a] text-black'
+              'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all',
+              viewMode === 'preview'
+                ? 'bg-white/10 text-white shadow-sm'
+                : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            {deploying ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />}
-            {deploying ? 'Deploying...' : 'Deploy'}
+            <Eye size={13} /> Preview
           </button>
-        </div>
-
-        <button
-          onClick={() => setShowChat(!showChat)}
-          className={cn('p-1.5 rounded transition-colors', showChat ? 'text-[#22c55e]' : 'text-gray-400 hover:text-white')}
-        >
-          <PanelLeft size={18} />
-        </button>
-      </header>
-
-      {/* Deploy dropdown */}
-      {showDeploy && (
-        <div className="absolute top-14 right-4 z-50 bg-[#161b22] border border-[#30363d] rounded-xl p-4 w-72 shadow-xl">
-          <h3 className="text-white font-semibold mb-3">Deploy to Netlify</h3>
-
-          {deployUrl && (
-            <div className="mb-3 p-2 bg-[#22c55e]/10 border border-[#22c55e]/20 rounded-lg">
-              <div className="flex items-center gap-1 mb-1">
-                <span className={cn('text-xs font-medium', deployStatusColor)}>
-                  {deployStatus === 'ready' ? 'Live' : deployStatus ?? 'Not deployed'}
-                </span>
-              </div>
-              <a href={deployUrl} target="_blank" rel="noreferrer"
-                className="text-xs text-blue-400 hover:underline break-all">{deployUrl}</a>
-            </div>
-          )}
-
           <button
-            onClick={() => { deploy(); setShowDeploy(false) }}
-            disabled={deploying}
-            className="w-full bg-[#22c55e] hover:bg-[#16a34a] text-black font-semibold py-2 rounded-lg transition-colors text-sm disabled:opacity-50"
+            onClick={() => setViewMode('code')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all',
+              viewMode === 'code'
+                ? 'bg-white/10 text-white shadow-sm'
+                : 'text-gray-500 hover:text-gray-300'
+            )}
           >
-            {deploying ? 'Deploying...' : deployUrl ? 'Redeploy' : 'Deploy Now'}
-          </button>
-
-          {project?.custom_domain && (
-            <div className="mt-3 pt-3 border-t border-[#30363d]">
-              <div className="flex items-center gap-1 text-xs text-[#22c55e]">
-                <Globe size={12} /> {project.custom_domain}
-              </div>
-            </div>
-          )}
-
-          <button onClick={() => setShowDeploy(false)} className="mt-2 text-xs text-gray-500 hover:text-gray-300 w-full text-center">
-            Close
+            <Code2 size={13} /> Code
           </button>
         </div>
-      )}
 
-      {/* Main content */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* File tree */}
-        {showFiles && (
-          <div className="w-48 border-r border-[#30363d] flex flex-col flex-shrink-0 bg-[#0d1117]">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-[#30363d]">
-              <span className="text-xs text-gray-400 font-medium uppercase tracking-wide">Files</span>
-              <button onClick={createNewFile} className="p-0.5 text-gray-500 hover:text-[#22c55e] rounded">
-                <Plus size={14} />
+        {/* Device size (preview only) */}
+        {viewMode === 'preview' && (
+          <div className="flex items-center gap-0.5 ml-1">
+            {([
+              { id: 'desktop', icon: Monitor, label: 'Desktop' },
+              { id: 'tablet', icon: Tablet, label: 'Tablet' },
+              { id: 'mobile', icon: Smartphone, label: 'Mobile' },
+            ] as const).map(({ id, icon: Icon, label }) => (
+              <button
+                key={id}
+                onClick={() => setDeviceSize(id)}
+                title={label}
+                className={cn(
+                  'p-1.5 rounded-md transition-all',
+                  deviceSize === id ? 'text-[#22c55e] bg-[#22c55e]/10' : 'text-gray-600 hover:text-gray-400'
+                )}
+              >
+                <Icon size={13} />
               </button>
-            </div>
-            <div className="flex-1 overflow-y-auto py-1">
-              {files.map(file => (
-                <button
-                  key={file.id}
-                  onClick={() => setActiveFile(file)}
-                  className={cn(
-                    'w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs transition-colors',
-                    activeFile?.id === file.id
-                      ? 'bg-[#22c55e]/10 text-[#22c55e]'
-                      : 'text-gray-400 hover:text-white hover:bg-[#161b22]'
-                  )}
-                >
-                  <FileText size={12} className="flex-shrink-0" />
-                  <span className="truncate">{file.name}</span>
-                  {file.is_entry && (
-                    <span className="ml-auto text-[10px] text-gray-600">entry</span>
-                  )}
-                </button>
-              ))}
-            </div>
+            ))}
           </div>
         )}
 
-        {/* Editor + Preview */}
-        <div className="flex flex-1 overflow-hidden">
-          {(tab === 'code' || tab === 'split') && (
-            <div className={cn('flex flex-col overflow-hidden', tab === 'split' ? 'w-1/2 border-r border-[#30363d]' : 'flex-1')}>
-              <div className="flex items-center gap-2 px-3 py-2 border-b border-[#30363d] bg-[#0d1117]">
-                <span className="text-xs text-gray-400">{activeFile?.path ?? 'No file selected'}</span>
+        <div className="flex-1" />
+
+        {/* Right actions */}
+        <div className="flex items-center gap-2">
+          {/* History / Revert */}
+          {fileHistory.length > 0 && (
+            <div className="relative">
+              <button
+                onClick={() => setShowHistory(h => !h)}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-white/10 hover:border-white/20 rounded-lg transition-all"
+                title="Version history"
+              >
+                <History size={12} />
+                <span className="text-[10px] bg-white/10 rounded px-1">{fileHistory.length}</span>
+              </button>
+              {showHistory && (
+                <div className="absolute top-full right-0 mt-2 z-50 bg-[#13131a] border border-white/10 rounded-xl p-3 w-72 shadow-2xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-white text-xs font-semibold">Version History</span>
+                    <button onClick={() => setShowHistory(false)} className="text-gray-600 hover:text-white"><X size={13} /></button>
+                  </div>
+                  <div className="space-y-1 max-h-56 overflow-y-auto">
+                    {[...fileHistory].reverse().map((snap, i) => {
+                      const realIndex = fileHistory.length - 1 - i
+                      return (
+                        <button
+                          key={realIndex}
+                          onClick={() => revertTo(realIndex)}
+                          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-white/[0.06] border border-transparent hover:border-white/10 transition-all group"
+                        >
+                          <Undo2 size={12} className="text-gray-600 group-hover:text-[#22c55e] flex-shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs text-gray-300 truncate">Before: "{snap.label}"</div>
+                            <div className="text-[10px] text-gray-600">v{realIndex + 1}</div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="mt-2 pt-2 border-t border-white/[0.06]">
+                    <button
+                      onClick={() => revertTo(fileHistory.length - 1)}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-[#22c55e] hover:bg-[#22c55e]/10 rounded-lg transition-colors"
+                    >
+                      <Undo2 size={12} /> Revert last change
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {deployUrl && (
+            <a
+              href={deployUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-white/10 hover:border-white/20 rounded-lg transition-all"
+            >
+              <ExternalLink size={12} /> Live site
+            </a>
+          )}
+
+          <button
+            onClick={() => router.push(`/builder/${projectId}/domains`)}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-gray-400 hover:text-white border border-white/10 hover:border-white/20 rounded-lg transition-all"
+          >
+            <Globe size={12} /> Domains
+          </button>
+
+          <div className="relative">
+            <button
+              onClick={() => setShowDeploy(!showDeploy)}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all',
+                deploying
+                  ? 'bg-blue-500/20 text-blue-400 cursor-wait'
+                  : 'bg-[#22c55e] hover:bg-[#16a34a] text-black shadow-lg shadow-[#22c55e]/20'
+              )}
+            >
+              {deploying ? <Loader2 size={13} className="animate-spin" /> : <Rocket size={13} />}
+              {deploying ? 'Deploying...' : 'Deploy'}
+            </button>
+
+            {showDeploy && (
+              <div className="absolute top-full right-0 mt-2 z-50 bg-[#13131a] border border-white/10 rounded-xl p-4 w-72 shadow-2xl">
+                <h3 className="text-white font-semibold mb-3 text-sm">Deploy to Netlify</h3>
+                {deployUrl && (
+                  <div className="mb-3 p-2.5 bg-[#22c55e]/5 border border-[#22c55e]/20 rounded-lg">
+                    <div className="text-xs font-medium text-[#22c55e] mb-1">
+                      {deployStatus === 'ready' ? '● Live' : deployStatus === 'in_progress' ? '⟳ Deploying...' : '○ Not deployed'}
+                    </div>
+                    <a href={deployUrl} target="_blank" rel="noreferrer"
+                      className="text-xs text-blue-400 hover:underline break-all">{deployUrl}</a>
+                  </div>
+                )}
+                <button
+                  onClick={deploy}
+                  disabled={deploying}
+                  className="w-full bg-[#22c55e] hover:bg-[#16a34a] text-black font-semibold py-2 rounded-lg transition-colors text-sm disabled:opacity-50"
+                >
+                  {deploying ? 'Deploying...' : deployUrl ? 'Redeploy' : 'Deploy Now'}
+                </button>
+                <button onClick={() => setShowDeploy(false)} className="mt-2 text-xs text-gray-600 hover:text-gray-400 w-full text-center">
+                  Close
+                </button>
               </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Main layout */}
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* ─── LEFT: AI Chat Panel ─── */}
+        <div className="w-[340px] flex-shrink-0 flex flex-col border-r border-white/[0.06] bg-[#0d0d14]">
+          {/* Chat header */}
+          <div className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5">
+            <div className="w-7 h-7 bg-gradient-to-br from-[#22c55e] to-[#16a34a] rounded-lg flex items-center justify-center shadow-lg shadow-[#22c55e]/20">
+              <Wand2 size={14} className="text-black" />
+            </div>
+            <div>
+              <div className="text-white text-sm font-semibold leading-none">Wilcart AI</div>
+              <div className="text-gray-600 text-[10px] mt-0.5">Website builder</div>
+            </div>
+            {generating && (
+              <div className="ml-auto flex items-center gap-1.5 text-[10px] text-[#22c55e]">
+                <span className="w-1.5 h-1.5 bg-[#22c55e] rounded-full animate-pulse" />
+                thinking
+              </div>
+            )}
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto py-4 px-3 space-y-3 scroll-smooth">
+            {messages.length === 0 && !streamText && (
+              <div className="py-6 px-2">
+                <div className="text-center mb-6">
+                  <div className="w-14 h-14 bg-gradient-to-br from-[#22c55e]/20 to-[#22c55e]/5 rounded-2xl flex items-center justify-center mx-auto mb-3 border border-[#22c55e]/20">
+                    <Sparkles size={24} className="text-[#22c55e]" />
+                  </div>
+                  <p className="text-white text-sm font-medium mb-1">What should we build?</p>
+                  <p className="text-gray-600 text-xs">Describe your dream website and AI will build it in seconds</p>
+                </div>
+                <div className="space-y-1.5">
+                  {SUGGESTIONS.map(s => (
+                    <button
+                      key={s}
+                      onClick={() => { setPrompt(s.replace(/^[^ ]+ /, '')); textareaRef.current?.focus() }}
+                      className="w-full text-left text-xs text-gray-500 hover:text-white bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/10 rounded-xl px-3.5 py-2.5 transition-all"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {messages.map((msg, msgIndex) => {
+              const displayContent = getDisplayContent(msg.content)
+              const isUser = msg.role === 'user'
+              // Find if there's a history snapshot that was saved before this AI message
+              // AI messages are at odd indexes (0=user,1=ai,2=user,3=ai...)
+              // history[i] = snapshot saved before messages[i*2+1] was generated
+              const aiMsgNumber = !isUser
+                ? messages.slice(0, msgIndex).filter(m => m.role === 'assistant').length
+                : -1
+              const hasSnapshot = !isUser && aiMsgNumber < fileHistory.length
+              return (
+                <div key={msg.id} className={cn('flex gap-2.5', isUser ? 'flex-row-reverse' : '')}>
+                  {!isUser && (
+                    <div className="w-6 h-6 bg-gradient-to-br from-[#22c55e] to-[#16a34a] rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm shadow-[#22c55e]/20">
+                      <Wand2 size={11} className="text-black" />
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-1 max-w-[82%]">
+                    <div
+                      className={cn(
+                        'rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed',
+                        isUser
+                          ? 'bg-[#22c55e]/10 text-white border border-[#22c55e]/20 rounded-tr-sm'
+                          : 'bg-white/[0.04] text-gray-300 border border-white/[0.06] rounded-tl-sm'
+                      )}
+                    >
+                      {displayContent || (
+                        <span className="flex items-center gap-1.5 text-[#22c55e] text-xs">
+                          <span className="w-1.5 h-1.5 bg-[#22c55e] rounded-full" />
+                          Website updated
+                        </span>
+                      )}
+                    </div>
+                    {hasSnapshot && (
+                      <button
+                        onClick={() => revertTo(aiMsgNumber)}
+                        className="flex items-center gap-1 text-[10px] text-gray-600 hover:text-[#22c55e] transition-colors self-start ml-1"
+                        title="Revert to before this change"
+                      >
+                        <Undo2 size={10} /> revert
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* Streaming message */}
+            {generating && (
+              <div className="flex gap-2.5">
+                <div className="w-6 h-6 bg-gradient-to-br from-[#22c55e] to-[#16a34a] rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <Wand2 size={11} className="text-black" />
+                </div>
+                <div className="max-w-[82%] bg-white/[0.04] border border-white/[0.06] rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm text-gray-300 leading-relaxed">
+                  {streamText ? (
+                    <span>
+                      {getDisplayContent(streamText) || (
+                        <span className="flex items-center gap-1 text-[#22c55e]">
+                          <Loader2 size={12} className="animate-spin" />
+                          Building your website{'.'.repeat(dotCount)}
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1 text-[#22c55e]">
+                      <Loader2 size={12} className="animate-spin" />
+                      Building your website{'.'.repeat(dotCount)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div ref={chatBottomRef} />
+          </div>
+
+          {/* Chat Input */}
+          <div className="p-3 border-t border-white/[0.06]">
+            {uploadedImage && (
+              <div className="mb-2 flex items-center gap-2 bg-white/[0.04] border border-white/[0.08] rounded-xl px-3 py-2">
+                <img
+                  src={`data:${uploadedImage.mediaType};base64,${uploadedImage.base64}`}
+                  className="h-9 w-9 object-cover rounded-lg"
+                  alt="Attached"
+                />
+                <span className="text-xs text-gray-400 flex-1">Image attached</span>
+                <button onClick={() => setUploadedImage(null)} className="text-gray-600 hover:text-white transition-colors">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            <div className="relative bg-white/[0.04] border border-white/[0.08] rounded-2xl focus-within:border-[#22c55e]/40 transition-all">
+              <textarea
+                ref={textareaRef}
+                value={prompt}
+                onChange={e => setPrompt(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt() } }}
+                placeholder="Describe what to build or change..."
+                rows={3}
+                className="w-full bg-transparent px-4 pt-3 pb-2 text-sm text-white placeholder-gray-600 focus:outline-none resize-none"
+                disabled={generating}
+              />
+              <div className="flex items-center justify-between px-3 pb-2.5">
+                <div className="flex items-center gap-1">
+                  <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+                  <button
+                    onClick={() => imageInputRef.current?.click()}
+                    title="Attach image"
+                    className="p-1.5 text-gray-600 hover:text-[#22c55e] rounded-lg transition-colors"
+                  >
+                    <ImagePlus size={15} />
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-gray-700">⏎ send</span>
+                  <button
+                    onClick={sendPrompt}
+                    disabled={generating || (!prompt.trim() && !uploadedImage)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all',
+                      generating || (!prompt.trim() && !uploadedImage)
+                        ? 'bg-white/5 text-gray-600 cursor-not-allowed'
+                        : 'bg-[#22c55e] hover:bg-[#16a34a] text-black shadow-md shadow-[#22c55e]/20'
+                    )}
+                  >
+                    {generating
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <Send size={13} />
+                    }
+                    {generating ? 'Generating' : 'Send'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ─── RIGHT: Preview / Code Panel ─── */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0a0f]">
+          {/* Preview toolbar */}
+          <div className="h-10 flex items-center gap-2 px-4 border-b border-white/[0.06] bg-[#0d0d14] flex-shrink-0">
+            {viewMode === 'preview' ? (
+              <>
+                {/* Browser-like URL bar */}
+                <div className="flex items-center gap-1.5 mr-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+                </div>
+                <div className="flex-1 max-w-sm mx-auto bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1 flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" />
+                  <span className="text-xs text-gray-600 truncate">
+                    {deployUrl ? deployUrl.replace('https://', '') : 'preview — localhost'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 ml-auto">
+                  <button
+                    onClick={() => {
+                      if (iframeRef.current) {
+                        const current = iframeRef.current.srcdoc
+                        iframeRef.current.srcdoc = ''
+                        requestAnimationFrame(() => { if (iframeRef.current) iframeRef.current.srcdoc = current })
+                      }
+                    }}
+                    className="p-1.5 text-gray-600 hover:text-white rounded-lg transition-colors"
+                    title="Refresh"
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowFiles(!showFiles)}
+                    className={cn(
+                      'flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg transition-colors',
+                      showFiles ? 'text-[#22c55e] bg-[#22c55e]/10' : 'text-gray-500 hover:text-white'
+                    )}
+                  >
+                    <FileText size={13} /> Files
+                  </button>
+                  {showFiles && files.map(file => (
+                    <button
+                      key={file.id}
+                      onClick={() => setActiveFile(file)}
+                      className={cn(
+                        'text-xs px-2.5 py-1 rounded-lg border transition-all',
+                        activeFile?.id === file.id
+                          ? 'bg-[#22c55e]/10 text-[#22c55e] border-[#22c55e]/20'
+                          : 'text-gray-500 border-transparent hover:border-white/10 hover:text-white'
+                      )}
+                    >
+                      {file.name}
+                    </button>
+                  ))}
+                  <button
+                    onClick={createNewFile}
+                    className="p-1 text-gray-600 hover:text-[#22c55e] rounded-lg transition-colors"
+                    title="New file"
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+                <div className="ml-auto text-xs text-gray-600">
+                  {activeFile?.path}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Preview iframe or Code Editor */}
+          {viewMode === 'preview' ? (
+            <div className="flex-1 overflow-auto flex justify-center bg-[#111118] p-0">
+              <div
+                style={{ width: previewWidth, maxWidth: '100%' }}
+                className="h-full transition-all duration-300"
+              >
+                <iframe
+                  ref={iframeRef}
+                  srcDoc={srcdoc}
+                  sandbox="allow-scripts allow-forms"
+                  className="w-full h-full border-none bg-white"
+                  title="preview"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-hidden">
               {activeFile ? (
                 <MonacoEditor
                   height="100%"
@@ -407,156 +841,21 @@ export default function EditorPage() {
                     automaticLayout: true,
                     lineNumbers: 'on',
                     folding: true,
-                    padding: { top: 8 },
+                    padding: { top: 12 },
+                    fontFamily: "'Fira Code', 'JetBrains Mono', monospace",
+                    fontLigatures: true,
                   }}
                   onChange={v => { if (v !== undefined) saveFileContent(v) }}
                 />
               ) : (
-                <div className="flex-1 flex items-center justify-center text-gray-600">
-                  <p>Select a file</p>
+                <div className="flex-1 flex items-center justify-center text-gray-600 h-full">
+                  <p>Select a file to edit</p>
                 </div>
               )}
-            </div>
-          )}
-
-          {(tab === 'preview' || tab === 'split') && (
-            <div className={cn('flex flex-col overflow-hidden', tab === 'split' ? 'w-1/2' : 'flex-1')}>
-              <div className="flex items-center justify-between px-3 py-2 border-b border-[#30363d] bg-[#0d1117]">
-                <span className="text-xs text-gray-400">Preview</span>
-                <button onClick={() => setPreviewKey(k => k + 1)} className="p-1 text-gray-500 hover:text-white rounded">
-                  <RefreshCw size={12} />
-                </button>
-              </div>
-              <iframe
-                key={previewKey}
-                srcDoc={srcdoc}
-                sandbox="allow-scripts allow-forms"
-                className="flex-1 w-full border-none bg-white"
-                title="preview"
-              />
             </div>
           )}
         </div>
-
-        {/* AI Chat */}
-        {showChat && (
-          <div className="w-80 border-l border-[#30363d] flex flex-col bg-[#0d1117] flex-shrink-0">
-            <div className="px-4 py-3 border-b border-[#30363d]">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 bg-[#22c55e] rounded-full flex items-center justify-center">
-                  <span className="text-black text-[10px] font-bold">AI</span>
-                </div>
-                <span className="text-sm font-semibold text-white">Wilcart AI</span>
-              </div>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-              {messages.length === 0 && !streamText && (
-                <div className="text-center py-8">
-                  <div className="w-12 h-12 bg-[#22c55e]/10 rounded-full flex items-center justify-center mx-auto mb-3">
-                    <Code2 size={20} className="text-[#22c55e]" />
-                  </div>
-                  <p className="text-gray-400 text-sm">Describe the website you want to build</p>
-                  <div className="mt-4 space-y-2">
-                    {[
-                      'Create a plumber service website',
-                      'Make a modern restaurant landing page',
-                      'Build a cleaning company homepage',
-                    ].map(s => (
-                      <button
-                        key={s}
-                        onClick={() => setPrompt(s)}
-                        className="block w-full text-left text-xs text-gray-500 hover:text-[#22c55e] bg-[#161b22] hover:bg-[#22c55e]/5 border border-[#30363d] rounded-lg px-3 py-2 transition-colors"
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {messages.map(msg => (
-                <div key={msg.id} className={cn('flex gap-2', msg.role === 'user' ? 'flex-row-reverse' : '')}>
-                  <div className={cn(
-                    'w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold',
-                    msg.role === 'user' ? 'bg-blue-500/20 text-blue-400' : 'bg-[#22c55e]/20 text-[#22c55e]'
-                  )}>
-                    {msg.role === 'user' ? 'U' : 'AI'}
-                  </div>
-                  <div className={cn(
-                    'max-w-[85%] rounded-xl px-3 py-2 text-sm',
-                    msg.role === 'user'
-                      ? 'bg-blue-500/10 text-blue-100'
-                      : 'bg-[#161b22] text-gray-300'
-                  )}>
-                    {/* Strip file blocks from display */}
-                    {msg.content.replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '').trim() || 'Generated code ↑'}
-                  </div>
-                </div>
-              ))}
-
-              {streamText && (
-                <div className="flex gap-2">
-                  <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold bg-[#22c55e]/20 text-[#22c55e]">
-                    AI
-                  </div>
-                  <div className="max-w-[85%] bg-[#161b22] rounded-xl px-3 py-2 text-sm text-gray-300">
-                    {streamText.replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '').trim() || (
-                      <span className="flex items-center gap-1">
-                        <Loader2 size={12} className="animate-spin" /> Generating...
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div ref={chatBottomRef} />
-            </div>
-
-            {/* Input */}
-            <div className="p-3 border-t border-[#30363d]">
-              {uploadedImage && (
-                <div className="mb-2 flex items-center gap-2 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2">
-                  <img src={`data:${uploadedImage.mediaType};base64,${uploadedImage.base64}`} className="h-10 w-10 object-cover rounded" />
-                  <span className="text-xs text-gray-400 flex-1">Screenshot attached</span>
-                  <button onClick={() => setUploadedImage(null)} className="text-gray-500 hover:text-white"><X size={14} /></button>
-                </div>
-              )}
-              <div className="flex gap-2">
-                <textarea
-                  value={prompt}
-                  onChange={e => setPrompt(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt() } }}
-                  placeholder="Describe what you want to build or change..."
-                  rows={3}
-                  className="flex-1 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-[#22c55e] focus:outline-none resize-none"
-                  disabled={generating}
-                />
-                <div className="flex flex-col gap-1 self-end">
-                  <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-                  <button
-                    onClick={() => imageInputRef.current?.click()}
-                    title="Upload screenshot"
-                    className="p-2 text-gray-400 hover:text-[#22c55e] bg-[#161b22] border border-[#30363d] rounded-lg transition-colors"
-                  >
-                    <ImagePlus size={16} />
-                  </button>
-                  <button
-                    onClick={sendPrompt}
-                    disabled={generating || (!prompt.trim() && !uploadedImage)}
-                    className="p-2 bg-[#22c55e] hover:bg-[#16a34a] text-black rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    {generating ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-                  </button>
-                </div>
-              </div>
-              <p className="text-[10px] text-gray-600 mt-1.5 text-center">Enter to send · Shift+Enter for new line</p>
-            </div>
-          </div>
-        )}
       </div>
-
     </div>
   )
 }

@@ -17,8 +17,9 @@ async function netlifyFetch(path: string, options: RequestInit = {}) {
   return res.json()
 }
 
-export async function createSite(name: string): Promise<{ id: string; name: string; url: string }> {
-  const data = await netlifyFetch('/sites', {
+export async function createSite(name: string, accountSlug?: string): Promise<{ id: string; name: string; url: string }> {
+  const path = accountSlug ? `/sites?account_slug=${accountSlug}` : '/sites'
+  const data = await netlifyFetch(path, {
     method: 'POST',
     body: JSON.stringify({ name }),
   })

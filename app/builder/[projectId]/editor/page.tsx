@@ -313,9 +313,20 @@ export default function EditorPage() {
     setShowDeploy(false)
     try {
       const res = await fetch(`/api/builder/deploy/${projectId}`, { method: 'POST' })
-      if (!res.ok) throw new Error('Deploy failed')
+      if (!res.ok) {
+        let errMsg = 'Deploy failed'
+        try { const j = await res.json(); errMsg = j.error ?? errMsg } catch {}
+        setDeployStatus('error')
+        setDeploying(false)
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+          content: `❌ Deploy failed: ${errMsg}`, affected_file_ids: null, input_tokens: null, output_tokens: null,
+          created_at: new Date().toISOString(),
+        }])
+        return
+      }
       pollDeployStatus()
-    } catch {
+    } catch (err) {
       setDeployStatus('error')
       setDeploying(false)
     }

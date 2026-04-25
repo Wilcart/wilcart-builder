@@ -299,6 +299,24 @@ export default function EditorPage() {
                   const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
                   return match ? { ...prev, content: match.content } : prev
                 })
+
+                // Check if any files are NEW (not in current filesRef) — e.g. about.html, quote.html
+                // If so, reload all files from server so page navigation works
+                const hasNewFiles = data.fileBlocks.some(
+                  (b: FileBlock) => !filesRef.current.find(f => f.path === b.path)
+                )
+                if (hasNewFiles) {
+                  const freshRes = await fetch(`/api/builder/files/${projectId}`)
+                  if (freshRes.ok) {
+                    const freshFiles: BuilderFile[] = await freshRes.json()
+                    setFiles(freshFiles)
+                    filesRef.current = freshFiles
+                    // Rebuild srcdoc with all fresh files (includes new pages for nav)
+                    if (iframeRef.current) {
+                      iframeRef.current.srcdoc = buildSrcdoc(freshFiles, previewPage)
+                    }
+                  }
+                }
               }
             } else if (data.type === 'error') {
               setStreamText('')

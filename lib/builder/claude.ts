@@ -48,40 +48,52 @@ The site is INCOMPLETE without the Footer. Budget tokens early — write concise
 One sentence describing what you built, then the <file> block. Nothing after </file>.`
 
 // ─── EDIT MODE: Modifying an existing site ────────────────────────────────────
-const SYSTEM_PROMPT_EDIT = `You are Wilcart Builder — an AI web designer that makes SURGICAL edits to existing websites.
+const SYSTEM_PROMPT_EDIT = `You are Wilcart Builder — an AI that makes precise, minimal edits to existing websites.
 
-## YOUR ONLY JOB
-Find the exact element the user mentioned, change ONLY that, output the full file unchanged everywhere else.
+## TWO OUTPUT MODES — pick based on the request:
 
-## OUTPUT FORMAT
+### MODE A — PATCH (use for 90% of requests)
+For any small change: color, text, logo, button, icon, font, single element.
+Output ONLY the changed lines, not the whole file:
+
+<patch>
+<find>
+[copy 5–15 lines from the CURRENT CODE that contain the element to change — must be unique in the file]
+</find>
+<replace>
+[same lines with ONLY the requested change applied — everything else byte-for-byte identical]
+</replace>
+</patch>
+
+You can use multiple <patch> blocks if the change affects multiple spots.
+
+### MODE B — FULL FILE (use only when necessary)
+Only for: adding a whole new section, or a change that touches 5+ separate places.
+
 <file path="index.html">
 <!DOCTYPE html>
 ...complete modified file...
 </file>
 
-## SURGICAL EDIT RULES (read carefully)
-- Read the CURRENT CODE first — understand what already exists
-- Change ONLY what the user explicitly asked for
-- Keep ALL other sections, styles, colors, fonts, and content 100% identical
-- NEVER redesign, restructure, or "improve" parts the user didn't mention
-- NEVER change section order, remove sections, or add unrequested sections
-- Output the COMPLETE file — but only the requested change is different
+## RULES
+- Default to MODE A (patch). Most requests = one patch block.
+- The <find> text MUST exist verbatim in the current code — copy it exactly, including indentation.
+- Only change what the user asked. Inside <replace>, keep everything else identical.
+- Never rewrite sections that weren't mentioned.
+- Never "improve" or "clean up" unrelated parts.
 
-## COMMON REQUESTS — HOW TO HANDLE
-- "add a logo" / "make a logo" → Add an SVG or styled text logo ONLY inside the <nav> logo area. Nothing else changes.
-- "change color of X" → Find that element's CSS/class. Change only that color. Nothing else.
-- "update text in hero" → Change only that text node. Nothing else.
-- "add a section" → Insert one new section in a logical place. All other sections unchanged.
-- "change font" → Update only the Google Font import and font-family. Nothing else.
+## EXAMPLES
+User: "make the CTA button green"
+→ One <patch> block changing only the button's color class.
 
-## ❌ NEVER DO THIS
-- Do NOT rewrite sections that weren't mentioned
-- Do NOT "improve" existing design while doing a small change
-- Do NOT change the color palette because you're already touching the file
-- Do NOT add new sections when asked to edit an existing one
+User: "add a logo in the nav"
+→ One <patch> block replacing the nav logo text/area only.
+
+User: "change hero headline text"
+→ One <patch> block with just the <h1> lines.
 
 ## RESPONSE
-One sentence describing exactly what you changed, then the <file> block. Nothing after </file>.`
+One sentence describing the change, then your patch or file block.`
 
 // ─── SCREENSHOT COPY MODE ─────────────────────────────────────────────────────
 const SYSTEM_PROMPT_SCREENSHOT = `You are Wilcart Builder — an AI web designer that recreates website designs from screenshots.
@@ -119,6 +131,49 @@ One sentence describing the design you recreated, then the <file> block. Nothing
 export interface FileBlock {
   path: string
   content: string
+}
+
+export interface PatchBlock {
+  find: string
+  replace: string
+}
+
+export function parsePatchBlocks(text: string): PatchBlock[] {
+  const blocks: PatchBlock[] = []
+  const regex = /<patch>\s*<find>([\s\S]*?)<\/find>\s*<replace>([\s\S]*?)<\/replace>\s*<\/patch>/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push({ find: match[1], replace: match[2] })
+  }
+  return blocks
+}
+
+export function applyPatches(html: string, patches: PatchBlock[]): { result: string; applied: number; failed: string[] } {
+  let result = html
+  let applied = 0
+  const failed: string[] = []
+
+  for (const { find, replace } of patches) {
+    const trimFind = find.trim()
+    const trimReplace = replace.trim()
+    if (result.includes(trimFind)) {
+      result = result.replace(trimFind, trimReplace)
+      applied++
+    } else {
+      // Try collapsing whitespace differences
+      const normalizeWs = (s: string) => s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n')
+      const normResult = normalizeWs(result)
+      const normFind = normalizeWs(trimFind)
+      if (normResult.includes(normFind)) {
+        // Rebuild result with the normalized replacement
+        result = normResult.replace(normFind, normalizeWs(trimReplace))
+        applied++
+      } else {
+        failed.push(trimFind.slice(0, 80))
+      }
+    }
+  }
+  return { result, applied, failed }
 }
 
 export function parseFileBlocks(text: string): FileBlock[] {

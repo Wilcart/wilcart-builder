@@ -48,8 +48,9 @@ export default function EditorPage() {
   const [uploadedImage, setUploadedImage] = useState<{ base64: string; mediaType: string } | null>(null)
   const [showFiles, setShowFiles] = useState(false)
   const [dotCount, setDotCount] = useState(1)
-  // Version history — snapshots before each AI generation (last 10)
-  const [fileHistory, setFileHistory] = useState<Array<{ files: BuilderFile[]; label: string }>>([])
+  // Version history — DB-backed snapshots (persist across page reloads)
+  type Snapshot = { id: string; label: string; files: BuilderFile[]; created_at: string }
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [showHistory, setShowHistory] = useState(false)
 
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -67,6 +68,7 @@ export default function EditorPage() {
   useEffect(() => {
     loadProject()
     loadMessages()
+    loadSnapshots()
   }, [projectId])
 
   useEffect(() => {
@@ -115,6 +117,36 @@ export default function EditorPage() {
     if (data) setMessages(data)
   }
 
+  async function loadSnapshots() {
+    const res = await fetch(`/api/builder/snapshots/${projectId}`)
+    if (!res.ok) return
+    const rows: Array<{ id: string; label: string; file_contents: Array<{ id: string; path: string; content: string }>; created_at: string }> = await res.json()
+    // Reconstruct Snapshot objects — merge stored content back into file shape
+    const snaps: Snapshot[] = rows.map(row => ({
+      id: row.id,
+      label: row.label,
+      created_at: row.created_at,
+      // file_contents is [{id, path, content}] — merge with current files on revert
+      files: row.file_contents as unknown as BuilderFile[],
+    }))
+    setSnapshots(snaps)
+  }
+
+  async function saveSnapshot(label: string) {
+    const currentFiles = filesRef.current
+    if (!currentFiles.some(f => f.content && f.content.length > 500)) return
+    const fileContents = currentFiles.map(f => ({ id: f.id, path: f.path, content: f.content }))
+    const res = await fetch(`/api/builder/snapshots/${projectId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, fileContents }),
+    })
+    if (!res.ok) return
+    const { id } = await res.json()
+    const snap: Snapshot = { id, label, files: currentFiles.map(f => ({ ...f })), created_at: new Date().toISOString() }
+    setSnapshots(prev => [snap, ...prev].slice(0, 10))
+  }
+
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -152,13 +184,8 @@ export default function EditorPage() {
     setGenerating(true)
     setStreamText('')
 
-    // Save snapshot BEFORE generation so user can revert
-    if (filesRef.current.some(f => f.content && f.content.length > 500)) {
-      setFileHistory(prev => [
-        ...prev.slice(-9),
-        { files: filesRef.current.map(f => ({ ...f })), label: userPrompt.slice(0, 50) },
-      ])
-    }
+    // Save snapshot BEFORE generation so user can revert (async, non-blocking)
+    saveSnapshot(userPrompt.slice(0, 60))
 
     const userMsg: BuilderMessage = {
       id: crypto.randomUUID(),
@@ -280,19 +307,23 @@ export default function EditorPage() {
     setGenerating(false)
   }
 
-  function revertTo(index: number) {
-    const snapshot = fileHistory[index]
-    if (!snapshot) return
-    // Restore files
-    setFiles(snapshot.files)
-    if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(snapshot.files)
+  async function revertTo(snap: Snapshot) {
+    // Merge stored content back into current file objects (keeps id/mime_type etc)
+    const restoredFiles = filesRef.current.map(f => {
+      const stored = (snap.files as unknown as Array<{ id: string; path: string; content: string }>)
+        .find(s => s.id === f.id || s.path === f.path)
+      return stored ? { ...f, content: stored.content } : f
+    })
+    setFiles(restoredFiles)
+    filesRef.current = restoredFiles
+    if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(restoredFiles)
     setActiveFile(prev => {
       if (!prev) return prev
-      return snapshot.files.find(f => f.id === prev.id) ?? prev
+      return restoredFiles.find(f => f.id === prev.id) ?? prev
     })
-    filesRef.current = snapshot.files
-    // Trim history to before this snapshot
-    setFileHistory(prev => prev.slice(0, index))
+    // Remove this snapshot and newer ones from DB + local state
+    await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
+    setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
     setShowHistory(false)
   }
 
@@ -453,7 +484,7 @@ export default function EditorPage() {
         {/* Right actions */}
         <div className="flex items-center gap-2">
           {/* History / Revert */}
-          {fileHistory.length > 0 && (
+          {snapshots.length > 0 && (
             <div className="relative">
               <button
                 onClick={() => setShowHistory(h => !h)}
@@ -461,7 +492,7 @@ export default function EditorPage() {
                 title="Version history"
               >
                 <History size={12} />
-                <span className="text-[10px] bg-white/10 rounded px-1">{fileHistory.length}</span>
+                <span className="text-[10px] bg-white/10 rounded px-1">{snapshots.length}</span>
               </button>
               {showHistory && (
                 <div className="absolute top-full right-0 mt-2 z-50 bg-[#13131a] border border-white/10 rounded-xl p-3 w-72 shadow-2xl">
@@ -470,26 +501,25 @@ export default function EditorPage() {
                     <button onClick={() => setShowHistory(false)} className="text-gray-600 hover:text-white"><X size={13} /></button>
                   </div>
                   <div className="space-y-1 max-h-56 overflow-y-auto">
-                    {[...fileHistory].reverse().map((snap, i) => {
-                      const realIndex = fileHistory.length - 1 - i
-                      return (
-                        <button
-                          key={realIndex}
-                          onClick={() => revertTo(realIndex)}
-                          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-white/[0.06] border border-transparent hover:border-white/10 transition-all group"
-                        >
-                          <Undo2 size={12} className="text-gray-600 group-hover:text-[#22c55e] flex-shrink-0" />
-                          <div className="min-w-0">
-                            <div className="text-xs text-gray-300 truncate">Before: "{snap.label}"</div>
-                            <div className="text-[10px] text-gray-600">v{realIndex + 1}</div>
+                    {snapshots.map((snap, i) => (
+                      <button
+                        key={snap.id}
+                        onClick={() => revertTo(snap)}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-white/[0.06] border border-transparent hover:border-white/10 transition-all group"
+                      >
+                        <Undo2 size={12} className="text-gray-600 group-hover:text-[#22c55e] flex-shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-xs text-gray-300 truncate">Before: "{snap.label}"</div>
+                          <div className="text-[10px] text-gray-600">
+                            {new Date(snap.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </div>
-                        </button>
-                      )
-                    })}
+                        </div>
+                      </button>
+                    ))}
                   </div>
                   <div className="mt-2 pt-2 border-t border-white/[0.06]">
                     <button
-                      onClick={() => revertTo(fileHistory.length - 1)}
+                      onClick={() => snapshots[0] && revertTo(snapshots[0])}
                       className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-[#22c55e] hover:bg-[#22c55e]/10 rounded-lg transition-colors"
                     >
                       <Undo2 size={12} /> Revert last change
@@ -610,13 +640,9 @@ export default function EditorPage() {
             {messages.map((msg, msgIndex) => {
               const displayContent = getDisplayContent(msg.content)
               const isUser = msg.role === 'user'
-              // Find if there's a history snapshot that was saved before this AI message
-              // AI messages are at odd indexes (0=user,1=ai,2=user,3=ai...)
-              // history[i] = snapshot saved before messages[i*2+1] was generated
-              const aiMsgNumber = !isUser
-                ? messages.slice(0, msgIndex).filter(m => m.role === 'assistant').length
-                : -1
-              const hasSnapshot = !isUser && aiMsgNumber < fileHistory.length
+              // Match this AI message to a snapshot by index (snapshots are newest-first)
+              const aiMsgsBefore = !isUser ? messages.slice(0, msgIndex).filter(m => m.role === 'assistant').length : -1
+              const snap = !isUser ? snapshots[snapshots.length - 1 - aiMsgsBefore] ?? null : null
               return (
                 <div key={msg.id} className={cn('flex gap-2.5', isUser ? 'flex-row-reverse' : '')}>
                   {!isUser && (
@@ -640,9 +666,9 @@ export default function EditorPage() {
                         </span>
                       )}
                     </div>
-                    {hasSnapshot && (
+                    {snap && (
                       <button
-                        onClick={() => revertTo(aiMsgNumber)}
+                        onClick={() => revertTo(snap)}
                         className="flex items-center gap-1 text-[10px] text-gray-600 hover:text-[#22c55e] transition-colors self-start ml-1"
                         title="Revert to before this change"
                       >

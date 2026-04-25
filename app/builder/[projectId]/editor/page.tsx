@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic'
 import { useParams, useRouter } from 'next/navigation'
 import type { BuilderProject, BuilderFile, BuilderMessage } from '@/types/builder'
 import type { FileBlock } from '@/lib/builder/claude'
-import { buildSrcdoc } from '@/lib/builder/preview'
+import { buildSrcdoc, getHtmlPages } from '@/lib/builder/preview'
 import {
   ChevronLeft, Send, Loader2, Globe, Rocket, Plus, FileText,
   Code2, Eye, ExternalLink, RefreshCw, X, ImagePlus, Sparkles,
@@ -52,6 +52,8 @@ export default function EditorPage() {
   type Snapshot = { id: string; label: string; files: BuilderFile[]; created_at: string }
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  // Multi-page preview
+  const [previewPage, setPreviewPage] = useState<string>('index.html')
 
   const imageInputRef = useRef<HTMLInputElement>(null)
   const chatBottomRef = useRef<HTMLDivElement>(null)
@@ -70,6 +72,22 @@ export default function EditorPage() {
     loadMessages()
     loadSnapshots()
   }, [projectId])
+
+  // Listen for page navigation from iframe (internal link clicks)
+  useEffect(() => {
+    function handleMessage(e: MessageEvent) {
+      if (e.data?.type === 'navigate' && e.data.page) {
+        const targetPage = e.data.page as string
+        setPreviewPage(targetPage)
+        const targetFile = filesRef.current.find(f => f.path === targetPage)
+        if (targetFile && iframeRef.current) {
+          iframeRef.current.srcdoc = buildSrcdoc(filesRef.current, targetPage)
+        }
+      }
+    }
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [])
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -269,8 +287,7 @@ export default function EditorPage() {
                 })
 
                 // ✅ DIRECT DOM update — bypasses React render cycle entirely
-                // This is what makes the preview update instantly without page reload
-                const newSrcdoc = buildSrcdoc(updatedFiles)
+                const newSrcdoc = buildSrcdoc(updatedFiles, previewPage)
                 if (iframeRef.current) {
                   iframeRef.current.srcdoc = newSrcdoc
                 }
@@ -408,13 +425,11 @@ export default function EditorPage() {
       .trim()
   }
 
-  const srcdoc = buildSrcdoc(files)
+  const srcdoc = buildSrcdoc(files, previewPage)
+  const htmlPages = getHtmlPages(files)
 
-  const previewWidth = {
-    desktop: '100%',
-    tablet: '768px',
-    mobile: '390px',
-  }[deviceSize]
+  const deviceWidths = { desktop: null, tablet: 768, mobile: 390 } as const
+  const devicePx = deviceWidths[deviceSize]
 
   return (
     <div className="h-screen bg-[#0a0a0f] flex flex-col overflow-hidden font-sans">
@@ -818,28 +833,54 @@ export default function EditorPage() {
         {/* ─── RIGHT: Preview / Code Panel ─── */}
         <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0a0f]">
           {/* Preview toolbar */}
-          <div className="h-10 flex items-center gap-2 px-4 border-b border-white/[0.06] bg-[#0d0d14] flex-shrink-0">
+          <div className="min-h-10 flex items-center gap-2 px-3 border-b border-white/[0.06] bg-[#0d0d14] flex-shrink-0 flex-wrap py-1">
             {viewMode === 'preview' ? (
               <>
-                {/* Browser-like URL bar */}
-                <div className="flex items-center gap-1.5 mr-2">
+                {/* Traffic lights */}
+                <div className="flex items-center gap-1 mr-1">
                   <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
                   <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
                   <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
                 </div>
-                <div className="flex-1 max-w-sm mx-auto bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1 flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" />
-                  <span className="text-xs text-gray-600 truncate">
-                    {deployUrl ? deployUrl.replace('https://', '') : 'preview — localhost'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1 ml-auto">
+
+                {/* Page tabs — shown when multiple HTML pages exist */}
+                {htmlPages.length > 1 ? (
+                  <div className="flex items-center gap-1 overflow-x-auto max-w-[320px]">
+                    {htmlPages.map(page => (
+                      <button
+                        key={page.id}
+                        onClick={() => {
+                          setPreviewPage(page.path)
+                          if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(files, page.path)
+                        }}
+                        className={cn(
+                          'flex-shrink-0 text-[11px] px-2.5 py-1 rounded-lg border transition-all whitespace-nowrap',
+                          previewPage === page.path
+                            ? 'bg-[#22c55e]/10 text-[#22c55e] border-[#22c55e]/20'
+                            : 'text-gray-500 border-white/[0.06] hover:text-white hover:border-white/20'
+                        )}
+                      >
+                        {page.path.replace('.html', '').replace('index', 'Home')}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  /* URL bar when single page */
+                  <div className="flex-1 max-w-xs bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1 flex items-center gap-2">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#22c55e] flex-shrink-0" />
+                    <span className="text-xs text-gray-600 truncate">
+                      {deployUrl ? `${deployUrl.replace('https://', '')}/${previewPage === 'index.html' ? '' : previewPage}` : `preview/${previewPage === 'index.html' ? '' : previewPage}`}
+                    </span>
+                  </div>
+                )}
+
+                <div className="ml-auto flex items-center gap-1">
                   <button
                     onClick={() => {
                       if (iframeRef.current) {
-                        const current = iframeRef.current.srcdoc
+                        const s = iframeRef.current.srcdoc
                         iframeRef.current.srcdoc = ''
-                        requestAnimationFrame(() => { if (iframeRef.current) iframeRef.current.srcdoc = current })
+                        requestAnimationFrame(() => { if (iframeRef.current) iframeRef.current.srcdoc = s })
                       }
                     }}
                     className="p-1.5 text-gray-600 hover:text-white rounded-lg transition-colors"
@@ -875,36 +916,40 @@ export default function EditorPage() {
                       {file.name}
                     </button>
                   ))}
-                  <button
-                    onClick={createNewFile}
-                    className="p-1 text-gray-600 hover:text-[#22c55e] rounded-lg transition-colors"
-                    title="New file"
-                  >
+                  <button onClick={createNewFile} className="p-1 text-gray-600 hover:text-[#22c55e] rounded-lg transition-colors" title="New file">
                     <Plus size={13} />
                   </button>
                 </div>
-                <div className="ml-auto text-xs text-gray-600">
-                  {activeFile?.path}
-                </div>
+                <div className="ml-auto text-xs text-gray-600">{activeFile?.path}</div>
               </>
             )}
           </div>
 
           {/* Preview iframe or Code Editor */}
           {viewMode === 'preview' ? (
-            <div className="flex-1 overflow-auto flex justify-center bg-[#111118] p-0">
-              <div
-                style={{ width: previewWidth, maxWidth: '100%' }}
-                className="h-full transition-all duration-300"
-              >
+            <div className="flex-1 overflow-auto bg-[#111118] flex items-start justify-center">
+              {devicePx ? (
+                /* Mobile / Tablet — show as device frame with scroll */
+                <div className="flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10"
+                  style={{ width: devicePx, height: 'calc(100% - 2rem)' }}>
+                  <iframe
+                    ref={iframeRef}
+                    srcDoc={srcdoc}
+                    sandbox="allow-scripts allow-forms allow-same-origin"
+                    className="w-full h-full border-none bg-white"
+                    title="preview"
+                  />
+                </div>
+              ) : (
+                /* Desktop — full width */
                 <iframe
                   ref={iframeRef}
                   srcDoc={srcdoc}
-                  sandbox="allow-scripts allow-forms"
+                  sandbox="allow-scripts allow-forms allow-same-origin"
                   className="w-full h-full border-none bg-white"
                   title="preview"
                 />
-              </div>
+              )}
             </div>
           ) : (
             <div className="flex-1 overflow-hidden">

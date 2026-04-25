@@ -361,9 +361,13 @@ export default function EditorPage() {
     }
   }
 
-  // Strip <file> blocks from message display
+  // Strip code blocks from message display — show only the human-readable part
   function getDisplayContent(content: string) {
-    return content.replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '').trim()
+    return content
+      .replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '')
+      .replace(/<patch>[\s\S]*?<\/patch>/g, '')
+      .replace(/<change>[\s\S]*?<\/change>/g, '')
+      .trim()
   }
 
   const srcdoc = buildSrcdoc(files)

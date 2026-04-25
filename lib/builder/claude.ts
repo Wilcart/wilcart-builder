@@ -57,6 +57,14 @@ If asked for a separate page (About, Contact, Quote, etc.), output MULTIPLE file
 - Padding: px-4 md:px-8 lg:px-16
 - Test mentally: does this look good at 390px width?
 
+## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
+- ALL nav links MUST use <a href="#sectionId"> for in-page scroll OR <a href="page.html"> for pages
+- NEVER use window.location, location.href, or location.assign for navigation
+- NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
+- Hamburger menu: JS only toggles show/hide of the menu — links inside use <a> tags
+- Smooth scroll: use CSS scroll-behavior:smooth on html, not JS scroll
+- SPA-style hidden sections: OK to show/hide divs, but use <a href="#id"> to trigger, not window.location
+
 ## RESPONSE
 One sentence describing what you built, then the <file> block(s). Nothing after the last </file>.`
 
@@ -113,6 +121,11 @@ If user asks to "create a new page" (e.g. "Get a Quote page", "About page"):
   <file path="quote.html">...complete new page with same nav + footer style...</file>
 - The new page must have the SAME nav and footer as the main site
 - Do NOT just scroll to an existing section — create an actual separate file
+
+## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
+- ALL nav links MUST use <a href="#sectionId"> or <a href="page.html"> — NEVER window.location
+- NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
+- Hamburger menu JS: only toggles visibility — never sets window.location or location.href
 
 ## RESPONSE
 One sentence describing the change, then your patch or file block(s).`

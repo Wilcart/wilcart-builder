@@ -63,6 +63,10 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
     var a=e.target.closest('a');
     if(!a)return;
     var href=a.getAttribute('href')||'';
+    // href="#" (blank hash) — prevent default scroll-to-top and stopPropagation
+    // so onclick handlers that do location.href= can't cause navigation
+    if(href==='#'||href===''){e.preventDefault();e.stopImmediatePropagation();return;}
+    // href="#sectionId" — let browser scroll naturally
     if(href.startsWith('#'))return;
     e.preventDefault();
     e.stopImmediatePropagation();

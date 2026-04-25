@@ -184,8 +184,9 @@ export default function EditorPage() {
     setGenerating(true)
     setStreamText('')
 
-    // Save snapshot BEFORE generation so user can revert (async, non-blocking)
-    saveSnapshot(userPrompt.slice(0, 60))
+    // Save snapshot BEFORE generation so user can revert
+    // Must await so snapshot exists before generation completes
+    await saveSnapshot(userPrompt.slice(0, 60))
 
     const userMsg: BuilderMessage = {
       id: crypto.randomUUID(),
@@ -686,31 +687,68 @@ export default function EditorPage() {
               )
             })}
 
-            {/* Streaming message */}
-            {generating && (
-              <div className="flex gap-2.5">
-                <div className="w-6 h-6 bg-gradient-to-br from-[#22c55e] to-[#16a34a] rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <Wand2 size={11} className="text-black" />
+            {/* Streaming message — animated build progress */}
+            {generating && (() => {
+              const visibleText = getDisplayContent(streamText)
+              const hasCode = streamText.length > 0 && !visibleText
+              const stage = !streamText ? 0 : visibleText ? 1 : streamText.length < 3000 ? 2 : streamText.length < 10000 ? 3 : 4
+              const stages = [
+                { icon: '🧠', label: 'Thinking', sub: 'Analyzing your request...' },
+                { icon: '✍️', label: 'Planning', sub: visibleText },
+                { icon: '🏗️', label: 'Building', sub: 'Writing HTML structure...' },
+                { icon: '🎨', label: 'Styling', sub: 'Adding styles & animations...' },
+                { icon: '✨', label: 'Finalizing', sub: 'Wrapping up the code...' },
+              ]
+              const current = stages[stage]
+              return (
+                <div className="flex gap-2.5">
+                  <div className="w-6 h-6 bg-gradient-to-br from-[#22c55e] to-[#16a34a] rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 shadow-sm shadow-[#22c55e]/30">
+                    <Wand2 size={11} className="text-black" />
+                  </div>
+                  <div className="max-w-[88%] bg-white/[0.04] border border-[#22c55e]/20 rounded-2xl rounded-tl-sm px-4 py-3 space-y-2.5">
+                    {/* Stage indicator */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-base leading-none">{current.icon}</span>
+                      <span className="text-xs font-semibold text-[#22c55e]">{current.label}</span>
+                      <span className="flex gap-0.5 ml-auto">
+                        {[0,1,2].map(i => (
+                          <span key={i} className={cn(
+                            'w-1 h-1 rounded-full transition-all duration-300',
+                            i < dotCount ? 'bg-[#22c55e]' : 'bg-white/10'
+                          )} />
+                        ))}
+                      </span>
+                    </div>
+                    {/* Progress steps */}
+                    <div className="space-y-1.5">
+                      {stages.slice(0, stage + 1).map((s, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <span className={cn(
+                            'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                            i < stage ? 'bg-[#22c55e]' : 'bg-[#22c55e] animate-pulse'
+                          )} />
+                          <span className={cn(
+                            'text-[11px] truncate',
+                            i < stage ? 'text-gray-500 line-through' : 'text-gray-300'
+                          )}>
+                            {i === stage && visibleText ? visibleText : s.sub}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {/* Token progress bar */}
+                    {streamText.length > 100 && (
+                      <div className="w-full h-0.5 bg-white/5 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-[#22c55e]/50 to-[#22c55e] rounded-full transition-all duration-500"
+                          style={{ width: `${Math.min(95, (streamText.length / 16000) * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="max-w-[82%] bg-white/[0.04] border border-white/[0.06] rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm text-gray-300 leading-relaxed">
-                  {streamText ? (
-                    <span>
-                      {getDisplayContent(streamText) || (
-                        <span className="flex items-center gap-1 text-[#22c55e]">
-                          <Loader2 size={12} className="animate-spin" />
-                          Building your website{'.'.repeat(dotCount)}
-                        </span>
-                      )}
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1 text-[#22c55e]">
-                      <Loader2 size={12} className="animate-spin" />
-                      Building your website{'.'.repeat(dotCount)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
+              )
+            })()}
 
             <div ref={chatBottomRef} />
           </div>

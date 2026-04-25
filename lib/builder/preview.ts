@@ -30,42 +30,74 @@ export function buildSrcdoc(files: BuilderFile[], activePath?: string): string {
   const navScript = `<script>
 (function(){
   var pages=${JSON.stringify(htmlPages)};
+
   function resolveHref(href){
-    if(!href)return null;
-    // Root "/" always means index.html
-    if(href==='/'||href==='./'){return'index.html';}
-    var clean=href.replace(/^\\/+/,'').replace(/\\.html$/,'');
-    // Exact match or with .html suffix
+    if(!href||href==='#')return null;
+    if(href==='/'||href==='./'||href==='./index.html')return'index.html';
+    var clean=href.replace(/^\\.\\//,'').replace(/^\\/+/,'').replace(/\\.html$/,'');
     for(var i=0;i<pages.length;i++){
       var p=pages[i];
-      if(p===href||p===href+'.html'||p===clean||p===clean+'.html'){return p;}
+      if(p===href||p===href+'.html'||p===clean||p===clean+'.html')return p;
     }
     return null;
   }
-  document.addEventListener('click',function(e){
-    var a=e.target.closest('a[href]');
-    if(!a)return;
-    var href=a.getAttribute('href')||'';
-    // Allow in-page hash links
-    if(href.startsWith('#'))return;
-    // Open truly external links in new tab safely
+
+  function handleNav(href){
+    if(!href)return;
+    if(href.startsWith('#')){
+      // in-page scroll
+      var el=document.getElementById(href.slice(1));
+      if(el)el.scrollIntoView({behavior:'smooth'});
+      return;
+    }
     if(href.startsWith('http://')||href.startsWith('https://')){
-      e.preventDefault();
       window.open(href,'_blank','noopener,noreferrer');
       return;
     }
-    // Ignore mailto/tel/javascript
     if(/^(mailto:|tel:|javascript:)/i.test(href))return;
-    // Block ALL other navigations — prevent white page
-    e.preventDefault();
     var page=resolveHref(href);
-    if(page){window.parent.postMessage({type:'navigate',page:page},'*');}
+    if(page)window.parent.postMessage({type:'navigate',page:page},'*');
+  }
+
+  // 1. Intercept <a> clicks (capture phase = before any other handler)
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('a');
+    if(!a)return;
+    var href=a.getAttribute('href')||'';
+    if(href.startsWith('#'))return; // let in-page anchors work normally
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    handleNav(href);
   },true);
-  // Also block form submissions that would navigate away
+
+  // 2. Block ALL location-based navigation by overriding window.location
+  var _loc={href:window.location.href,pathname:'/',search:'',hash:'',
+    assign:function(u){handleNav(u);},
+    replace:function(u){handleNav(u);},
+    reload:function(){}};
+  try{
+    Object.defineProperty(window,'location',{get:function(){return _loc;},configurable:true});
+  }catch(e){}
+
+  // 3. Neutralise history navigation
+  try{
+    window.history.pushState=function(s,t,url){if(url)handleNav(String(url));};
+    window.history.replaceState=function(s,t,url){if(url)handleNav(String(url));};
+  }catch(e){}
+
+  // 4. Block form submissions that would navigate away
   document.addEventListener('submit',function(e){
     var form=e.target;
-    if(form&&!form.getAttribute('action')){e.preventDefault();}
+    var action=form&&form.getAttribute('action');
+    if(!action||action.startsWith('#')){e.preventDefault();}
   },true);
+
+  // 5. Last-resort: if iframe somehow starts navigating, tell parent to reload srcdoc
+  window.addEventListener('beforeunload',function(e){
+    window.parent.postMessage({type:'reload'},'*');
+    e.preventDefault();
+    return false;
+  });
 })();
 </script>`
 

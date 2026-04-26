@@ -57,9 +57,9 @@ export async function POST(
   })
 
   // 4) Apply the snapshot's content to matching files (match by id, fallback to path)
-  const updatePromises: Promise<unknown>[] = []
   let applied = 0
   let skipped = 0
+  const updatePromises: Array<PromiseLike<unknown>> = []
 
   for (const storedFile of stored) {
     const target = currentFiles.find(
@@ -69,15 +69,18 @@ export async function POST(
       skipped++
       continue
     }
+    // Supabase PostgrestFilterBuilder is thenable; wrap to make it a real Promise
     updatePromises.push(
-      admin
-        .from('builder_files')
-        .update({
-          content: storedFile.content,
-          size_bytes: storedFile.content.length,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', target.id)
+      Promise.resolve(
+        admin
+          .from('builder_files')
+          .update({
+            content: storedFile.content,
+            size_bytes: storedFile.content.length,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', target.id)
+      )
     )
     applied++
   }

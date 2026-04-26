@@ -15,7 +15,7 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false 
 
 // Bump this on every deploy so user (and Claude debugging together) can tell
 // which version is actually live in the browser. Visible in the top-right corner.
-const BUILD_VERSION = '2026-04-26_C2' // Commit 2: client always refetches DB
+const BUILD_VERSION = '2026-04-26_C3' // Commit 3: append-only revert
 
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'
@@ -377,54 +377,51 @@ export default function EditorPage() {
 
   async function revertTo(snap: Snapshot) {
     setShowHistory(false)
-    const stored = snap.files as unknown as Array<{ id: string; path: string; content: string }>
 
-    // Build the list of files we'll restore (matched by id or path)
-    const restoredFiles = filesRef.current.map(f => {
-      const match = stored.find(s => s.id === f.id || s.path === f.path)
-      return match ? { ...f, content: match.content } : f
+    // Single atomic server call — server saves a "before revert" snapshot first,
+    // then applies this snapshot's content to all matching files. Append-only:
+    // history is preserved so user can undo the revert.
+    const res = await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, {
+      method: 'POST',
     })
 
-    // CRITICAL: persist to DB BEFORE updating UI. If saves fail, abort and tell the user.
-    const filesToSave = restoredFiles.filter(f => stored.some(s => s.id === f.id || s.path === f.path))
-    const saveResults = await Promise.all(
-      filesToSave.map(f =>
-        fetch(`/api/builder/files/${projectId}/${f.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: f.content }),
-        }).then(r => ({ ok: r.ok, status: r.status, path: f.path }))
-         .catch(e => ({ ok: false, status: 0, path: f.path, err: String(e) }))
-      )
-    )
-    const failed = saveResults.filter(r => !r.ok)
-    if (failed.length > 0) {
-      console.error('[Revert] DB saves failed:', failed)
+    if (!res.ok) {
+      let errMsg = 'Revert failed'
+      try { const j = await res.json(); errMsg = j.error ?? errMsg } catch {}
+      console.error('[Revert] Server error:', res.status, errMsg)
       setMessages(prev => [...prev, {
         id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-        content: `❌ Revert failed — ${failed.length}/${saveResults.length} file(s) couldn't be saved (${failed.map(f => `${f.path}: ${f.status}`).join(', ')}). Try refreshing (Cmd+Shift+R) and retry.`,
+        content: `❌ Revert failed (${res.status}): ${errMsg}. Try refreshing the page and retry.`,
         affected_file_ids: null, input_tokens: null, output_tokens: null,
         created_at: new Date().toISOString(),
       }])
       return
     }
 
-    // Now update UI — DB is in sync
-    setFiles(restoredFiles)
-    filesRef.current = restoredFiles
-    showPreview(restoredFiles, 'index.html')
-    setActiveFile(prev => {
-      if (!prev) return prev
-      return restoredFiles.find(f => f.id === prev.id) ?? prev
-    })
+    const result = await res.json() as { applied: number; skipped: number }
 
-    // Remove this snapshot and newer ones from DB + local state
-    await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
-    setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
+    // Refetch files from DB — server is the source of truth
+    const freshRes = await fetch(`/api/builder/files/${projectId}`)
+    if (freshRes.ok) {
+      const freshFiles: BuilderFile[] = await freshRes.json()
+      setFiles(freshFiles)
+      filesRef.current = freshFiles
+      setPreviewPage('index.html')
+      if (viewMode === 'preview') showPreview(freshFiles, 'index.html')
+      setActiveFile(prev => {
+        if (!prev) return freshFiles.find(f => f.is_entry) ?? freshFiles[0] ?? null
+        return freshFiles.find(f => f.id === prev.id)
+          ?? freshFiles.find(f => f.path === prev.path)
+          ?? prev
+      })
+    }
+
+    // Reload snapshot list — a new "Before revert to..." snapshot was just created
+    await loadSnapshots()
 
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-      content: `✓ Reverted to: "${snap.label}"`,
+      content: `✓ Reverted to: "${snap.label}" (${result.applied} file${result.applied !== 1 ? 's' : ''} restored). The previous state was saved as a new snapshot — you can undo this revert from the history.`,
       affected_file_ids: null, input_tokens: null, output_tokens: null,
       created_at: new Date().toISOString(),
     }])

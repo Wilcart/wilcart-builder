@@ -3,7 +3,6 @@ import { useEffect, useState, useRef } from 'react'
 import dynamic from 'next/dynamic'
 import { useParams, useRouter } from 'next/navigation'
 import type { BuilderProject, BuilderFile, BuilderMessage } from '@/types/builder'
-import type { FileBlock } from '@/lib/builder/claude'
 import { buildSrcdoc, getHtmlPages } from '@/lib/builder/preview'
 import {
   ChevronLeft, Send, Loader2, Globe, Rocket, Plus, FileText,
@@ -16,7 +15,7 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false 
 
 // Bump this on every deploy so user (and Claude debugging together) can tell
 // which version is actually live in the browser. Visible in the top-right corner.
-const BUILD_VERSION = '2026-04-26_C1' // Commit 1: kill patches
+const BUILD_VERSION = '2026-04-26_C2' // Commit 2: client always refetches DB
 
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'
@@ -287,85 +286,91 @@ export default function EditorPage() {
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
       let accumulated = ''
+      let sseBuffer = ''
+
+      // Single source of truth: after `done`, always refetch files from DB.
+      // Don't trust streamed payload — large `done` events can split across
+      // multiple read() chunks, and patches no longer exist anyway.
+      const refetchAndApply = async () => {
+        const freshRes = await fetch(`/api/builder/files/${projectId}`)
+        if (!freshRes.ok) return
+        const freshFiles: BuilderFile[] = await freshRes.json()
+        setFiles(freshFiles)
+        filesRef.current = freshFiles
+        if (viewMode === 'preview') showPreview(freshFiles, previewPage)
+        setActiveFile(prev => {
+          if (!prev) return freshFiles.find(f => f.is_entry) ?? freshFiles[0] ?? null
+          return freshFiles.find(f => f.id === prev.id)
+            ?? freshFiles.find(f => f.path === prev.path)
+            ?? prev
+        })
+      }
 
       while (reader) {
         const { done, value } = await reader.read()
         if (done) break
-        const text = decoder.decode(value)
-        const lines = text.split('\n')
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const data = JSON.parse(line.slice(6))
-            if (data.type === 'delta') {
-              accumulated += data.text
-              setStreamText(accumulated)
-            } else if (data.type === 'done') {
-              setStreamText('')
-              const assistantMsg: BuilderMessage = {
-                id: crypto.randomUUID(),
-                project_id: projectId,
-                org_id: '',
-                role: 'assistant',
-                content: accumulated,
-                affected_file_ids: data.updatedFileIds ?? [],
-                input_tokens: null,
-                output_tokens: null,
-                created_at: new Date().toISOString(),
+        sseBuffer += decoder.decode(value, { stream: true })
+        // SSE events are separated by \n\n. Keep the last incomplete chunk in buffer.
+        const events = sseBuffer.split('\n\n')
+        sseBuffer = events.pop() ?? ''
+        for (const event of events) {
+          for (const line of event.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (data.type === 'delta') {
+                accumulated += data.text
+                setStreamText(accumulated)
+              } else if (data.type === 'done') {
+                setStreamText('')
+                setMessages(prev => [...prev, {
+                  id: crypto.randomUUID(),
+                  project_id: projectId,
+                  org_id: '',
+                  role: 'assistant',
+                  content: accumulated,
+                  affected_file_ids: data.updatedFileIds ?? [],
+                  input_tokens: null,
+                  output_tokens: null,
+                  created_at: new Date().toISOString(),
+                }])
+                if (!data.failed) await refetchAndApply()
+                // If validation failed server-side, accumulated already contains
+                // the warning text from the streamed delta — nothing more to do.
+              } else if (data.type === 'error') {
+                setStreamText('')
+                setMessages(prev => [...prev, {
+                  id: crypto.randomUUID(),
+                  project_id: projectId,
+                  org_id: '',
+                  role: 'assistant',
+                  content: `❌ ${data.message}`,
+                  affected_file_ids: null,
+                  input_tokens: null,
+                  output_tokens: null,
+                  created_at: new Date().toISOString(),
+                }])
               }
-              setMessages(prev => [...prev, assistantMsg])
-
-              if (data.fileBlocks && data.fileBlocks.length > 0) {
-                const hasNewFiles = data.fileBlocks.some(
-                  (b: FileBlock) => !filesRef.current.find((f: BuilderFile) => f.path === b.path)
-                )
-
-                if (hasNewFiles) {
-                  // New pages created — reload all files from server to get proper file objects
-                  const freshRes = await fetch(`/api/builder/files/${projectId}`)
-                  if (freshRes.ok) {
-                    const freshFiles: BuilderFile[] = await freshRes.json()
-                    setFiles(freshFiles)
-                    filesRef.current = freshFiles
-                    showPreview(freshFiles, previewPage)
-                  }
-                } else {
-                  // Existing files updated — patch client state
-                  const updatedFiles = filesRef.current.map((f: BuilderFile) => {
-                    const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
-                    return match ? { ...f, content: match.content } : f
-                  })
-                  setFiles(updatedFiles)
-                  showPreview(updatedFiles, previewPage)
-                }
-
-                setActiveFile(prev => {
-                  if (!prev) return prev
-                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
-                  return match ? { ...prev, content: match.content } : prev
-                })
-              }
-            } else if (data.type === 'error') {
-              setStreamText('')
-              const errMsg: BuilderMessage = {
-                id: crypto.randomUUID(),
-                project_id: projectId,
-                org_id: '',
-                role: 'assistant',
-                content: `Error: ${data.message}`,
-                affected_file_ids: null,
-                input_tokens: null,
-                output_tokens: null,
-                created_at: new Date().toISOString(),
-              }
-              setMessages(prev => [...prev, errMsg])
+            } catch (parseErr) {
+              console.error('[SSE parse error]', parseErr, 'line:', line.slice(0, 100))
             }
-          } catch {}
+          }
         }
       }
     } catch (err) {
-      console.error(err)
+      console.error('[stream error]', err)
       setStreamText('')
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        project_id: projectId,
+        org_id: '',
+        role: 'assistant' as const,
+        content: `❌ Connection error: ${err instanceof Error ? err.message : 'Unknown'}. Try again.`,
+        affected_file_ids: null,
+        input_tokens: null,
+        output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
     }
     setGenerating(false)
   }
@@ -735,31 +740,6 @@ export default function EditorPage() {
             )}
           </div>
 
-          {/* Escape hatch: when the site is broken from accumulated edits and patches
-              fail, this button sends a strong "rewrite the entire file from scratch"
-              prompt that bypasses patch mode entirely. */}
-          {files.length > 0 && !generating && (
-            <div className="px-3 py-2 border-b border-white/[0.06]">
-              <button
-                onClick={() => {
-                  // This prompt forces Claude to do a FULL site rebuild (not a surgical edit).
-                  // It's processed as a 'rebuild intent' on the server which switches to a
-                  // CREATE-style prompt with the existing business info as context.
-                  const rewritePrompt = "REBUILD the entire site from scratch. Look at the current code, extract the business name, phone, email, address, and any service descriptions. Then generate a COMPLETELY NEW clean index.html with all 9 standard sections (Nav, Hero, Services, Stats, How It Works, Testimonials, FAQ, Contact form, Footer) — no broken structure, no showPage/switchPage SPA functions, plain anchor links only. Output the entire file from <!DOCTYPE html> to </html> in a single <file path=\"index.html\"> block."
-                  setPrompt(rewritePrompt)
-                  setTimeout(() => {
-                    const sendBtn = document.querySelector<HTMLButtonElement>('[data-send-btn]')
-                    sendBtn?.click()
-                  }, 50)
-                }}
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-orange-300 bg-orange-500/10 hover:bg-orange-500/15 border border-orange-500/30 hover:border-orange-500/50 rounded-lg transition-all"
-                title="Use when the site is broken or patches keep failing"
-              >
-                🔧 Rewrite from scratch
-              </button>
-            </div>
-          )}
-
           {/* Messages */}
           <div className="flex-1 overflow-y-auto py-4 px-3 space-y-3 scroll-smooth">
             {messages.length === 0 && !streamText && (
@@ -939,7 +919,6 @@ export default function EditorPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-gray-700">⏎ send</span>
                   <button
-                    data-send-btn
                     onClick={sendPrompt}
                     disabled={generating || (!prompt.trim() && !uploadedImage)}
                     className={cn(

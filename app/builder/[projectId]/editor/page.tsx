@@ -79,11 +79,12 @@ export default function EditorPage() {
     if (iframeRef.current) iframeRef.current.src = url
   }
 
-  // Rebuild preview whenever files, active page, or device size changes
-  // deviceSize triggers iframe remount (different JSX structure), so src must be reapplied
+  // Rebuild preview whenever files, active page, device size, or view mode changes.
+  // viewMode is included so the preview is (re)applied when switching back to preview mode,
+  // since the iframe is only mounted when viewMode === 'preview'.
   useEffect(() => {
-    if (files.length > 0) showPreview(files, previewPage)
-  }, [files, previewPage, deviceSize])
+    if (files.length > 0 && viewMode === 'preview') showPreview(files, previewPage)
+  }, [files, previewPage, deviceSize, viewMode])
 
   // Cleanup blob URL on unmount
   useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
@@ -999,26 +1000,19 @@ export default function EditorPage() {
           {/* Preview iframe or Code Editor */}
           {viewMode === 'preview' ? (
             <div className="flex-1 overflow-auto bg-[#111118] flex items-start justify-center">
-              {devicePx ? (
-                /* Mobile / Tablet — show as device frame with scroll */
-                <div className="flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10"
-                  style={{ width: devicePx, height: 'calc(100% - 2rem)' }}>
-                  <iframe
-                    ref={iframeRef}
-                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-                    className="w-full h-full border-none bg-white"
-                    title="preview"
-                  />
-                </div>
-              ) : (
-                /* Desktop — full width */
+              {/* Always keep the iframe in the same tree position to prevent remount on device switch.
+                  Only the wrapper div's style changes — desktop: full size, tablet/mobile: fixed width frame */}
+              <div
+                className={devicePx ? 'flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10' : 'w-full h-full flex flex-col'}
+                style={devicePx ? { width: devicePx, height: 'calc(100% - 2rem)' } : { width: '100%', height: '100%' }}
+              >
                 <iframe
                   ref={iframeRef}
                   sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
                   className="w-full h-full border-none bg-white"
                   title="preview"
                 />
-              )}
+              </div>
             </div>
           ) : (
             <div className="flex-1 overflow-hidden">

@@ -69,16 +69,9 @@ export default function EditorPage() {
   // Keep filesRef in sync so async stream callbacks always see latest files
   useEffect(() => { filesRef.current = files }, [files])
 
-  // Track the last HTML rendered so we can skip recreating the blob URL when nothing changed
-  // (prevents the white flash on device-size switch where the iframe is preserved but the effect re-fires)
-  const lastHtmlRef = useRef<string>('')
-
-  // Build preview blob URL and inject into iframe.
-  // Skips work if the resulting HTML is identical to what's already loaded.
+  // Build preview blob URL and inject into iframe
   function showPreview(filesToUse: BuilderFile[], page: string) {
     const html = buildSrcdoc(filesToUse, page)
-    if (html === lastHtmlRef.current && blobUrlRef.current && iframeRef.current?.src === blobUrlRef.current) return
-    lastHtmlRef.current = html
     if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
     const blob = new Blob([html], { type: 'text/html' })
     const url = URL.createObjectURL(blob)
@@ -86,18 +79,10 @@ export default function EditorPage() {
     if (iframeRef.current) iframeRef.current.src = url
   }
 
-  // Rebuild preview whenever files, active page, or view mode changes.
-  // - deviceSize is intentionally NOT a dep: the iframe is preserved across device switches
-  //   (same tree position with only wrapper style changing), so the blob URL doesn't need recreating.
-  // - viewMode IS a dep: the iframe is unmounted in code mode, so when switching back to preview
-  //   we need to re-apply the blob URL to the freshly-mounted iframe.
+  // Rebuild preview whenever files or active page changes
   useEffect(() => {
-    if (files.length > 0 && viewMode === 'preview') {
-      // When the iframe was just remounted (viewMode flip), force a re-apply by clearing the cache.
-      lastHtmlRef.current = ''
-      showPreview(files, previewPage)
-    }
-  }, [files, previewPage, viewMode])
+    if (files.length > 0) showPreview(files, previewPage)
+  }, [files, previewPage])
 
   // Cleanup blob URL on unmount
   useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
@@ -298,17 +283,12 @@ export default function EditorPage() {
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
       let accumulated = ''
-      let sseBuffer = ''
 
       while (reader) {
         const { done, value } = await reader.read()
         if (done) break
-        sseBuffer += decoder.decode(value, { stream: true })
-        // Process only complete SSE lines (split on \n\n to get full events)
-        const parts = sseBuffer.split('\n\n')
-        // Last part may be incomplete — keep it in buffer
-        sseBuffer = parts.pop() ?? ''
-        const lines = parts.flatMap(p => p.split('\n'))
+        const text = decoder.decode(value)
+        const lines = text.split('\n')
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           try {
@@ -331,34 +311,35 @@ export default function EditorPage() {
               }
               setMessages(prev => [...prev, assistantMsg])
 
-              // ALWAYS reload files from server after generation.
-              // This is the source of truth — don't trust the streamed fileBlocks (which can
-              // arrive truncated or be missed if the SSE done event got split). The server
-              // already committed all changes to DB before sending done.
-              const freshRes = await fetch(`/api/builder/files/${projectId}`)
-              if (freshRes.ok) {
-                const freshFiles: BuilderFile[] = await freshRes.json()
-                setFiles(freshFiles)
-                filesRef.current = freshFiles
-                lastHtmlRef.current = '' // force preview rebuild
-                if (viewMode === 'preview') showPreview(freshFiles, previewPage)
-                // Sync activeFile with reloaded version
+              if (data.fileBlocks && data.fileBlocks.length > 0) {
+                const hasNewFiles = data.fileBlocks.some(
+                  (b: FileBlock) => !filesRef.current.find((f: BuilderFile) => f.path === b.path)
+                )
+
+                if (hasNewFiles) {
+                  // New pages created — reload all files from server to get proper file objects
+                  const freshRes = await fetch(`/api/builder/files/${projectId}`)
+                  if (freshRes.ok) {
+                    const freshFiles: BuilderFile[] = await freshRes.json()
+                    setFiles(freshFiles)
+                    filesRef.current = freshFiles
+                    showPreview(freshFiles, previewPage)
+                  }
+                } else {
+                  // Existing files updated — patch client state
+                  const updatedFiles = filesRef.current.map((f: BuilderFile) => {
+                    const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
+                    return match ? { ...f, content: match.content } : f
+                  })
+                  setFiles(updatedFiles)
+                  showPreview(updatedFiles, previewPage)
+                }
+
                 setActiveFile(prev => {
                   if (!prev) return prev
-                  return freshFiles.find(f => f.id === prev.id) ?? freshFiles.find(f => f.path === prev.path) ?? prev
+                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
+                  return match ? { ...prev, content: match.content } : prev
                 })
-              }
-
-              // If nothing was applied (no fileBlocks AND no updatedFileIds), warn the user
-              const nothingApplied = (!data.updatedFileIds || data.updatedFileIds.length === 0)
-                && (!data.fileBlocks || data.fileBlocks.length === 0)
-              if (nothingApplied) {
-                setMessages(prev => [...prev, {
-                  id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-                  content: `⚠️ No changes were applied. The AI's response didn't include valid code blocks. Please try rephrasing — for example, "completely rewrite the [section name] with [your changes]".`,
-                  affected_file_ids: null, input_tokens: null, output_tokens: null,
-                  created_at: new Date().toISOString(),
-                }])
               }
             } else if (data.type === 'error') {
               setStreamText('')
@@ -375,120 +356,34 @@ export default function EditorPage() {
               }
               setMessages(prev => [...prev, errMsg])
             }
-          } catch (parseErr) {
-            // SSE line failed to parse — log it so we can debug streaming issues
-            console.error('[SSE parse error]', parseErr, 'line length:', line.length, 'preview:', line.slice(0, 100))
-          }
+          } catch {}
         }
       }
     } catch (err) {
-      console.error('[Stream error]', err)
+      console.error(err)
       setStreamText('')
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-        content: `❌ Connection error: ${err instanceof Error ? err.message : 'Unknown'}. Try again.`,
-        affected_file_ids: null, input_tokens: null, output_tokens: null,
-        created_at: new Date().toISOString(),
-      }])
     }
     setGenerating(false)
   }
 
   async function revertTo(snap: Snapshot) {
-    setShowHistory(false)
-    const storedList = snap.files as unknown as Array<{ id: string; path: string; content: string }>
-    if (!storedList || storedList.length === 0) {
-      console.error('[Revert] Snapshot has no files', snap)
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-        content: `⚠️ Can't revert — this snapshot has no saved content.`,
-        affected_file_ids: null, input_tokens: null, output_tokens: null,
-        created_at: new Date().toISOString(),
-      }])
-      return
-    }
-
-    console.log('[Revert] Starting revert. Snapshot files:', storedList.length, 'Current files:', filesRef.current.length)
-
-    // Step 1: Persist restored content to DB FIRST. Match by path (more reliable than id).
-    type SaveAttempt = { path: string; res: Response | null; error?: string }
-    const saveAttempts: SaveAttempt[] = []
-
-    for (const stored of storedList) {
-      const current = filesRef.current.find(f => f.id === stored.id || f.path === stored.path)
-      if (!current) {
-        saveAttempts.push({ path: stored.path, res: null, error: 'file not in current state' })
-        console.warn('[Revert] Stored file not found in current state:', stored.path)
-        continue
-      }
-      try {
-        const res = await fetch(`/api/builder/files/${projectId}/${current.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: stored.content }),
-        })
-        if (!res.ok) {
-          let errBody = ''
-          try { const j = await res.json(); errBody = j.error ?? '' } catch {}
-          console.error('[Revert] PATCH failed for', stored.path, 'status:', res.status, 'error:', errBody)
-          saveAttempts.push({ path: stored.path, res, error: `${res.status} ${errBody}` })
-        } else {
-          console.log('[Revert] Saved', stored.path)
-          saveAttempts.push({ path: stored.path, res })
-        }
-      } catch (err) {
-        console.error('[Revert] Network error for', stored.path, err)
-        saveAttempts.push({ path: stored.path, res: null, error: err instanceof Error ? err.message : 'network error' })
-      }
-    }
-
-    const failed = saveAttempts.filter(a => a.error)
-    if (failed.length === saveAttempts.length) {
-      // ALL saves failed — abort, don't update UI optimistically
-      const details = failed.slice(0, 3).map(f => `${f.path}: ${f.error}`).join('; ')
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-        content: `❌ Revert failed — none of the files could be saved to the database. ${details}. Try refreshing the page (Cmd+Shift+R) and retry.`,
-        affected_file_ids: null, input_tokens: null, output_tokens: null,
-        created_at: new Date().toISOString(),
-      }])
-      return
-    }
-    if (failed.length > 0) {
-      // Some saves failed — warn but continue
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-        content: `⚠️ Revert partially completed — ${failed.length} of ${saveAttempts.length} file(s) couldn't be saved.`,
-        affected_file_ids: null, input_tokens: null, output_tokens: null,
-        created_at: new Date().toISOString(),
-      }])
-    }
-
-    // Step 2: Reload files from DB (single source of truth — confirms what was saved)
-    const freshRes = await fetch(`/api/builder/files/${projectId}`)
-    if (freshRes.ok) {
-      const freshFiles: BuilderFile[] = await freshRes.json()
-      setFiles(freshFiles)
-      filesRef.current = freshFiles
-      setPreviewPage('index.html')
-      lastHtmlRef.current = '' // force preview rebuild
-      if (viewMode === 'preview') showPreview(freshFiles, 'index.html')
-      setActiveFile(prev => {
-        if (!prev) return freshFiles.find(f => f.is_entry) ?? freshFiles[0] ?? null
-        return freshFiles.find(f => f.id === prev.id) ?? freshFiles.find(f => f.path === prev.path) ?? prev
-      })
-    }
-
-    // Step 3: Remove this snapshot and newer ones from DB + local state
+    // Merge stored content back into current file objects (keeps id/mime_type etc)
+    const restoredFiles = filesRef.current.map(f => {
+      const stored = (snap.files as unknown as Array<{ id: string; path: string; content: string }>)
+        .find(s => s.id === f.id || s.path === f.path)
+      return stored ? { ...f, content: stored.content } : f
+    })
+    setFiles(restoredFiles)
+    filesRef.current = restoredFiles
+    showPreview(restoredFiles, 'index.html')
+    setActiveFile(prev => {
+      if (!prev) return prev
+      return restoredFiles.find(f => f.id === prev.id) ?? prev
+    })
+    // Remove this snapshot and newer ones from DB + local state
     await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
     setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
-
-    setMessages(prev => [...prev, {
-      id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
-      content: `✓ Reverted to: "${snap.label}"`,
-      affected_file_ids: null, input_tokens: null, output_tokens: null,
-      created_at: new Date().toISOString(),
-    }])
+    setShowHistory(false)
   }
 
   async function saveFileContent(content: string) {
@@ -1083,22 +978,27 @@ export default function EditorPage() {
 
           {/* Preview iframe or Code Editor */}
           {viewMode === 'preview' ? (
-            <div className="flex-1 overflow-auto bg-[#111118] p-4">
-              {/* Stable wrapper — className NEVER changes, only style.width transitions.
-                  Iframe stays mounted with src intact across all device-size changes.
-                  bg-[#111118] (matches parent) prevents the white flash some browsers show
-                  during iframe re-layout when its containing block resizes. */}
-              <div
-                className="mx-auto bg-[#111118] shadow-2xl rounded-lg overflow-hidden h-full transition-[max-width] duration-200 ease-out"
-                style={{ maxWidth: devicePx ? `${devicePx}px` : '100%' }}
-              >
+            <div className="flex-1 overflow-auto bg-[#111118] flex items-start justify-center">
+              {devicePx ? (
+                /* Mobile / Tablet — show as device frame with scroll */
+                <div className="flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10"
+                  style={{ width: devicePx, height: 'calc(100% - 2rem)' }}>
+                  <iframe
+                    ref={iframeRef}
+                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
+                    className="w-full h-full border-none bg-white"
+                    title="preview"
+                  />
+                </div>
+              ) : (
+                /* Desktop — full width */
                 <iframe
                   ref={iframeRef}
                   sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-                  className="w-full h-full border-none block"
+                  className="w-full h-full border-none bg-white"
                   title="preview"
                 />
-              </div>
+              )}
             </div>
           ) : (
             <div className="flex-1 overflow-hidden">

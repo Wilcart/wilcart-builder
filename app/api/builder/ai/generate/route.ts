@@ -68,7 +68,12 @@ export async function POST(req: Request) {
               fileBlocks = [{ path: entryFile.path, content: result }]
               if (failed.length > 0) {
                 console.warn('[Patch] Failed to apply', failed.length, 'patch(es):', failed)
+                fullText += `\n\n⚠️ ${failed.length} change(s) couldn't be applied automatically. Please ask me to **rewrite that section completely** if you don't see the update.`
               }
+            } else {
+              // All patches failed — nothing changed, warn the user
+              console.warn('[Patch] All patches failed:', failed)
+              fullText += `\n\n⚠️ I couldn't apply the changes — the code structure didn't match my patch. Please tell me to **completely rewrite** that section and I'll redo it from scratch.`
             }
           }
         } else {

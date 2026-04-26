@@ -98,6 +98,13 @@ Only for: adding a whole new section, or a change that touches 5+ separate place
 ...complete modified file...
 </file>
 
+### 🔧 ALWAYS USE MODE B (FULL FILE) WHEN:
+- User says the site is "broken", asks to "fix", "repair", "restore", "rewrite", "redo", or any similar repair intent
+- The current code contains showPage(), switchPage(), or any SPA-style display toggling — REWRITE without these patterns, using real <a href="#section"> anchors or real separate page files
+- The current code has duplicate sections, malformed tags, or visibly broken structure
+- You're unsure your patch will match cleanly — better to rewrite the whole file than ship a failed patch
+NEVER attempt to surgically patch a broken file. Patches require the surrounding code to be intact and unique. If the file is in a bad state, output the full corrected file instead.
+
 ## RULES
 - Default to MODE A (patch). Most requests = one patch block.
 - The <find> text MUST exist verbatim in the current code — copy it exactly, including indentation.
@@ -307,12 +314,24 @@ USER REQUEST: ${prompt || 'Update the design to match this screenshot reference'
   } else if (existingContent) {
     // MODE: Edit existing site with text instructions
     systemPrompt = SYSTEM_PROMPT_EDIT
+
+    // Detect "fix the broken site" intent — these prompts must use FULL FILE mode
+    // because patches on broken HTML fail unreliably. Also detect SPA showPage poison
+    // in the current code.
+    const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo|починить|восстанови|почини|сломан|перепиш)/i.test(prompt)
+    const hasSpaPoison = /showPage\s*\(|switchPage\s*\(|navigateTo\s*\(/.test(entryFile?.content ?? '')
+    const forceFullFile = repairIntent || hasSpaPoison
+
+    const repairInstruction = forceFullFile
+      ? `\n\n🔧 IMPORTANT: ${repairIntent ? 'The user is asking you to fix or rewrite the site.' : ''}${hasSpaPoison ? ' The current code contains showPage()/SPA-style navigation that breaks reliably.' : ''} You MUST output the COMPLETE corrected file using <file path="index.html">...</file>. Do NOT use <patch> blocks — they will fail on this code. Rewrite using plain <a href="#section"> for in-page links and real separate .html files for separate pages.`
+      : ''
+
     userMessage = `CURRENT WEBSITE CODE (apply the changes below to this code):
 <file path="index.html">
 ${entryFile?.content ?? ''}
 </file>
 
-USER REQUEST: ${prompt}
+USER REQUEST: ${prompt}${repairInstruction}
 
 Remember: ONLY change what the user asked for. Keep everything else exactly the same.`
 

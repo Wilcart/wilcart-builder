@@ -63,9 +63,29 @@ export default function EditorPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   // Keep a live ref to files so async callbacks always have the latest value
   const filesRef = useRef<BuilderFile[]>([])
+  // Blob URL for preview — gives iframe a real URL so allow-same-origin works safely
+  const blobUrlRef = useRef<string | null>(null)
 
   // Keep filesRef in sync so async stream callbacks always see latest files
   useEffect(() => { filesRef.current = files }, [files])
+
+  // Build preview blob URL and inject into iframe
+  function showPreview(filesToUse: BuilderFile[], page: string) {
+    const html = buildSrcdoc(filesToUse, page)
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
+    const blob = new Blob([html], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    blobUrlRef.current = url
+    if (iframeRef.current) iframeRef.current.src = url
+  }
+
+  // Rebuild preview whenever files or active page changes
+  useEffect(() => {
+    if (files.length > 0) showPreview(files, previewPage)
+  }, [files, previewPage])
+
+  // Cleanup blob URL on unmount
+  useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
 
   useEffect(() => {
     loadProject()
@@ -78,10 +98,22 @@ export default function EditorPage() {
     function handleMessage(e: MessageEvent) {
       if (e.data?.type === 'navigate' && e.data.page) {
         const targetPage = e.data.page as string
-        setPreviewPage(targetPage)
-        const targetFile = filesRef.current.find(f => f.path === targetPage)
-        if (targetFile && iframeRef.current) {
-          iframeRef.current.srcdoc = buildSrcdoc(filesRef.current, targetPage)
+        const currentFiles = filesRef.current
+        const targetExists = currentFiles.some(f => f.path === targetPage)
+        if (targetExists) {
+          setPreviewPage(targetPage)
+          showPreview(currentFiles, targetPage)
+        } else {
+          // Page not in client state — reload from server (e.g. after multi-page generation)
+          fetch(`/api/builder/files/${projectId}`)
+            .then(r => r.ok ? r.json() : null)
+            .then((fresh: BuilderFile[] | null) => {
+              if (!fresh) return
+              setFiles(fresh)
+              filesRef.current = fresh
+              setPreviewPage(targetPage)
+              showPreview(fresh, targetPage)
+            })
         }
       }
     }
@@ -280,43 +312,34 @@ export default function EditorPage() {
               setMessages(prev => [...prev, assistantMsg])
 
               if (data.fileBlocks && data.fileBlocks.length > 0) {
-                // Build updated files array from latest ref (avoids stale closure)
-                const updatedFiles = filesRef.current.map((f: BuilderFile) => {
-                  const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
-                  return match ? { ...f, content: match.content } : f
-                })
-
-                // ✅ DIRECT DOM update — bypasses React render cycle entirely
-                const newSrcdoc = buildSrcdoc(updatedFiles, previewPage)
-                if (iframeRef.current) {
-                  iframeRef.current.srcdoc = newSrcdoc
-                }
-
-                // Sync React state for code editor / file list consistency
-                setFiles(updatedFiles)
-                setActiveFile(prev => {
-                  if (!prev) return prev
-                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
-                  return match ? { ...prev, content: match.content } : prev
-                })
-
-                // Check if any files are NEW (not in current filesRef) — e.g. about.html, quote.html
-                // If so, reload all files from server so page navigation works
                 const hasNewFiles = data.fileBlocks.some(
-                  (b: FileBlock) => !filesRef.current.find(f => f.path === b.path)
+                  (b: FileBlock) => !filesRef.current.find((f: BuilderFile) => f.path === b.path)
                 )
+
                 if (hasNewFiles) {
+                  // New pages created — reload all files from server to get proper file objects
                   const freshRes = await fetch(`/api/builder/files/${projectId}`)
                   if (freshRes.ok) {
                     const freshFiles: BuilderFile[] = await freshRes.json()
                     setFiles(freshFiles)
                     filesRef.current = freshFiles
-                    // Rebuild srcdoc with all fresh files (includes new pages for nav)
-                    if (iframeRef.current) {
-                      iframeRef.current.srcdoc = buildSrcdoc(freshFiles, previewPage)
-                    }
+                    showPreview(freshFiles, previewPage)
                   }
+                } else {
+                  // Existing files updated — patch client state
+                  const updatedFiles = filesRef.current.map((f: BuilderFile) => {
+                    const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
+                    return match ? { ...f, content: match.content } : f
+                  })
+                  setFiles(updatedFiles)
+                  showPreview(updatedFiles, previewPage)
                 }
+
+                setActiveFile(prev => {
+                  if (!prev) return prev
+                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
+                  return match ? { ...prev, content: match.content } : prev
+                })
               }
             } else if (data.type === 'error') {
               setStreamText('')
@@ -352,7 +375,7 @@ export default function EditorPage() {
     })
     setFiles(restoredFiles)
     filesRef.current = restoredFiles
-    if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(restoredFiles)
+    showPreview(restoredFiles, 'index.html')
     setActiveFile(prev => {
       if (!prev) return prev
       return restoredFiles.find(f => f.id === prev.id) ?? prev
@@ -456,7 +479,6 @@ export default function EditorPage() {
       .trim()
   }
 
-  const srcdoc = buildSrcdoc(files, previewPage)
   const htmlPages = getHtmlPages(files)
 
   const deviceWidths = { desktop: null, tablet: 768, mobile: 390 } as const
@@ -886,7 +908,7 @@ export default function EditorPage() {
                         key={page.id}
                         onClick={() => {
                           setPreviewPage(page.path)
-                          if (iframeRef.current) iframeRef.current.srcdoc = buildSrcdoc(files, page.path)
+                          showPreview(files, page.path)
                         }}
                         className={cn(
                           'flex-shrink-0 text-[11px] px-2.5 py-1 rounded-lg border transition-all whitespace-nowrap',
@@ -911,13 +933,7 @@ export default function EditorPage() {
 
                 <div className="ml-auto flex items-center gap-1">
                   <button
-                    onClick={() => {
-                      if (iframeRef.current) {
-                        const s = iframeRef.current.srcdoc
-                        iframeRef.current.srcdoc = ''
-                        requestAnimationFrame(() => { if (iframeRef.current) iframeRef.current.srcdoc = s })
-                      }
-                    }}
+                    onClick={() => showPreview(filesRef.current, previewPage)}
                     className="p-1.5 text-gray-600 hover:text-white rounded-lg transition-colors"
                     title="Refresh"
                   >
@@ -969,8 +985,7 @@ export default function EditorPage() {
                   style={{ width: devicePx, height: 'calc(100% - 2rem)' }}>
                   <iframe
                     ref={iframeRef}
-                    srcDoc={srcdoc}
-                    sandbox="allow-scripts allow-forms allow-popups"
+                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
                     className="w-full h-full border-none bg-white"
                     title="preview"
                   />
@@ -979,8 +994,7 @@ export default function EditorPage() {
                 /* Desktop — full width */
                 <iframe
                   ref={iframeRef}
-                  srcDoc={srcdoc}
-                  sandbox="allow-scripts allow-forms allow-popups"
+                  sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
                   className="w-full h-full border-none bg-white"
                   title="preview"
                 />

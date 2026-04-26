@@ -367,12 +367,40 @@ export default function EditorPage() {
   }
 
   async function revertTo(snap: Snapshot) {
-    // Merge stored content back into current file objects (keeps id/mime_type etc)
+    setShowHistory(false)
+    const stored = snap.files as unknown as Array<{ id: string; path: string; content: string }>
+
+    // Build the list of files we'll restore (matched by id or path)
     const restoredFiles = filesRef.current.map(f => {
-      const stored = (snap.files as unknown as Array<{ id: string; path: string; content: string }>)
-        .find(s => s.id === f.id || s.path === f.path)
-      return stored ? { ...f, content: stored.content } : f
+      const match = stored.find(s => s.id === f.id || s.path === f.path)
+      return match ? { ...f, content: match.content } : f
     })
+
+    // CRITICAL: persist to DB BEFORE updating UI. If saves fail, abort and tell the user.
+    const filesToSave = restoredFiles.filter(f => stored.some(s => s.id === f.id || s.path === f.path))
+    const saveResults = await Promise.all(
+      filesToSave.map(f =>
+        fetch(`/api/builder/files/${projectId}/${f.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: f.content }),
+        }).then(r => ({ ok: r.ok, status: r.status, path: f.path }))
+         .catch(e => ({ ok: false, status: 0, path: f.path, err: String(e) }))
+      )
+    )
+    const failed = saveResults.filter(r => !r.ok)
+    if (failed.length > 0) {
+      console.error('[Revert] DB saves failed:', failed)
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+        content: `❌ Revert failed — ${failed.length}/${saveResults.length} file(s) couldn't be saved (${failed.map(f => `${f.path}: ${f.status}`).join(', ')}). Try refreshing (Cmd+Shift+R) and retry.`,
+        affected_file_ids: null, input_tokens: null, output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
+      return
+    }
+
+    // Now update UI — DB is in sync
     setFiles(restoredFiles)
     filesRef.current = restoredFiles
     showPreview(restoredFiles, 'index.html')
@@ -380,10 +408,17 @@ export default function EditorPage() {
       if (!prev) return prev
       return restoredFiles.find(f => f.id === prev.id) ?? prev
     })
+
     // Remove this snapshot and newer ones from DB + local state
     await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
     setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
-    setShowHistory(false)
+
+    setMessages(prev => [...prev, {
+      id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+      content: `✓ Reverted to: "${snap.label}"`,
+      affected_file_ids: null, input_tokens: null, output_tokens: null,
+      created_at: new Date().toISOString(),
+    }])
   }
 
   async function saveFileContent(content: string) {

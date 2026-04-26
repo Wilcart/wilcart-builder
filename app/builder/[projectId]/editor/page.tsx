@@ -14,6 +14,10 @@ import { cn } from '@/lib/utils'
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false })
 
+// Bump this on every deploy so user (and Claude debugging together) can tell
+// which version is actually live in the browser. Visible in the top-right corner.
+const BUILD_VERSION = '2026-04-26_00:39'
+
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'
 
@@ -531,6 +535,15 @@ export default function EditorPage() {
           <ChevronLeft size={16} className="group-hover:-translate-x-0.5 transition-transform" />
         </button>
 
+        {/* Build version — verify cache-bust worked. If you don't see this version
+            after a deploy, hard-refresh with Cmd+Shift+R */}
+        <span
+          className="text-[9px] text-gray-700 font-mono select-all"
+          title="Build version. If this doesn't match what was just deployed, do Cmd+Shift+R to clear cache."
+        >
+          v{BUILD_VERSION}
+        </span>
+
         <div className="flex items-center gap-2 min-w-0">
           <img src="/logo.png" alt="Wilcart" className="h-5 w-auto flex-shrink-0" />
           <span className="text-white/80 font-medium text-sm truncate max-w-[160px]">
@@ -1013,27 +1026,21 @@ export default function EditorPage() {
 
           {/* Preview iframe or Code Editor */}
           {viewMode === 'preview' ? (
-            <div className="flex-1 overflow-auto bg-[#111118] flex items-start justify-center">
-              {devicePx ? (
-                /* Mobile / Tablet — show as device frame with scroll */
-                <div className="flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10"
-                  style={{ width: devicePx, height: 'calc(100% - 2rem)' }}>
-                  <iframe
-                    ref={iframeRef}
-                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-                    className="w-full h-full border-none bg-white"
-                    title="preview"
-                  />
-                </div>
-              ) : (
-                /* Desktop — full width */
+            <div className="flex-1 overflow-auto bg-[#111118] p-4">
+              {/* Single-branch JSX so the iframe is at the SAME tree position regardless
+                  of device size. React doesn't unmount/remount it — src is preserved.
+                  Wrapper className is constant; only style.maxWidth changes. */}
+              <div
+                className="mx-auto h-full overflow-hidden rounded-lg shadow-2xl bg-white transition-[max-width] duration-200 ease-out"
+                style={{ maxWidth: devicePx ? `${devicePx}px` : '100%' }}
+              >
                 <iframe
                   ref={iframeRef}
                   sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-                  className="w-full h-full border-none bg-white"
+                  className="w-full h-full border-none block"
                   title="preview"
                 />
-              )}
+              </div>
             </div>
           ) : (
             <div className="flex-1 overflow-hidden">

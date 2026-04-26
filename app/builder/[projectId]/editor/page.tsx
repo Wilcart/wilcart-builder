@@ -16,7 +16,7 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false 
 
 // Bump this on every deploy so user (and Claude debugging together) can tell
 // which version is actually live in the browser. Visible in the top-right corner.
-const BUILD_VERSION = '2026-04-26_00:55'
+const BUILD_VERSION = '2026-04-26_10:35'
 
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'
@@ -742,9 +742,11 @@ export default function EditorPage() {
             <div className="px-3 py-2 border-b border-white/[0.06]">
               <button
                 onClick={() => {
-                  const rewritePrompt = "Rewrite the entire index.html file from scratch. Output the COMPLETE corrected file using <file path=\"index.html\">. Do NOT use <patch>. Use plain <a href=\"#section\"> for in-page anchors and real separate .html files for separate pages. Keep all the existing content, sections, business info, colors and design — just produce a clean valid HTML structure without any showPage/switchPage SPA functions."
+                  // This prompt forces Claude to do a FULL site rebuild (not a surgical edit).
+                  // It's processed as a 'rebuild intent' on the server which switches to a
+                  // CREATE-style prompt with the existing business info as context.
+                  const rewritePrompt = "REBUILD the entire site from scratch. Look at the current code, extract the business name, phone, email, address, and any service descriptions. Then generate a COMPLETELY NEW clean index.html with all 9 standard sections (Nav, Hero, Services, Stats, How It Works, Testimonials, FAQ, Contact form, Footer) — no broken structure, no showPage/switchPage SPA functions, plain anchor links only. Output the entire file from <!DOCTYPE html> to </html> in a single <file path=\"index.html\"> block."
                   setPrompt(rewritePrompt)
-                  // Auto-send so user doesn't have to confirm
                   setTimeout(() => {
                     const sendBtn = document.querySelector<HTMLButtonElement>('[data-send-btn]')
                     sendBtn?.click()

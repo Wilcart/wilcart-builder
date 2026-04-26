@@ -260,10 +260,19 @@ function hasRealContent(files: BuilderFile[]): boolean {
 // Detect "must rewrite full file" intent — repair-prompt OR existing code has SPA poison
 export function shouldForceFullFile(prompt: string, projectFiles: BuilderFile[]): boolean {
   const entryFile = projectFiles.find(f => f.path === 'index.html' || f.is_entry)
-  const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo)\b/i.test(prompt)
-    || /(почин|восстанов|сломан|перепиш|сделай заново|сделать заново)/i.test(prompt)
+  const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo|rebuild)\b/i.test(prompt)
+    || /(почин|восстанов|сломан|перепиш|сделай заново|сделать заново|пересобр)/i.test(prompt)
   const hasSpaPoison = /showPage\s*\(|switchPage\s*\(|navigateTo\s*\(/.test(entryFile?.content ?? '')
   return repairIntent || hasSpaPoison
+}
+
+// Detect "FULL REBUILD" intent — like clicking the orange Rewrite-from-scratch button.
+// When true, use CREATE prompt + extracted business info instead of EDIT prompt with patches.
+export function isFullRebuildIntent(prompt: string): boolean {
+  return /\bREBUILD\b/.test(prompt)  // explicit marker from the Rewrite-from-scratch button
+    || /rewrite the entire (site|website|index)/i.test(prompt)
+    || /перепиши (весь|всё|сайт)/i.test(prompt)
+    || /пересобрать (весь|всё|сайт)/i.test(prompt)
 }
 
 export async function* streamGenerate(
@@ -319,6 +328,23 @@ ${entryFile?.content ?? ''}
 USER REQUEST: ${prompt || 'Update the design to match this screenshot reference'}`,
       },
     ]
+
+  } else if (existingContent && isFullRebuildIntent(prompt)) {
+    // MODE: Full rebuild — use CREATE prompt (with all 9 sections) + business info from old code.
+    // This bypasses EDIT mode entirely so Claude doesn't get tempted to patch.
+    systemPrompt = SYSTEM_PROMPT_CREATE
+
+    // Strip the existing code to a compact business-info summary so Claude has
+    // context (name, phone, services, colors) without being influenced by broken HTML.
+    const oldCode = entryFile?.content ?? ''
+    userMessage = `Build a complete fresh website. Use the business information from the existing code below as your reference (business name, contact info, service descriptions, color scheme, industry). Do NOT copy the existing HTML structure — generate a clean new one with all 9 standard sections. Do NOT include any showPage/switchPage SPA functions.
+
+EXISTING CODE (reference only — for business info, NOT structure):
+\`\`\`html
+${oldCode.length > 12000 ? oldCode.slice(0, 6000) + '\n...[truncated]...\n' + oldCode.slice(-3000) : oldCode}
+\`\`\`
+
+USER REQUEST: ${prompt}`
 
   } else if (existingContent) {
     // MODE: Edit existing site with text instructions

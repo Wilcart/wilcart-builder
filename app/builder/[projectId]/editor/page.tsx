@@ -69,9 +69,16 @@ export default function EditorPage() {
   // Keep filesRef in sync so async stream callbacks always see latest files
   useEffect(() => { filesRef.current = files }, [files])
 
-  // Build preview blob URL and inject into iframe
+  // Track the last HTML rendered so we can skip recreating the blob URL when nothing changed
+  // (prevents the white flash on device-size switch where the iframe is preserved but the effect re-fires)
+  const lastHtmlRef = useRef<string>('')
+
+  // Build preview blob URL and inject into iframe.
+  // Skips work if the resulting HTML is identical to what's already loaded.
   function showPreview(filesToUse: BuilderFile[], page: string) {
     const html = buildSrcdoc(filesToUse, page)
+    if (html === lastHtmlRef.current && blobUrlRef.current && iframeRef.current?.src === blobUrlRef.current) return
+    lastHtmlRef.current = html
     if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
     const blob = new Blob([html], { type: 'text/html' })
     const url = URL.createObjectURL(blob)
@@ -79,12 +86,18 @@ export default function EditorPage() {
     if (iframeRef.current) iframeRef.current.src = url
   }
 
-  // Rebuild preview whenever files, active page, device size, or view mode changes.
-  // viewMode is included so the preview is (re)applied when switching back to preview mode,
-  // since the iframe is only mounted when viewMode === 'preview'.
+  // Rebuild preview whenever files, active page, or view mode changes.
+  // - deviceSize is intentionally NOT a dep: the iframe is preserved across device switches
+  //   (same tree position with only wrapper style changing), so the blob URL doesn't need recreating.
+  // - viewMode IS a dep: the iframe is unmounted in code mode, so when switching back to preview
+  //   we need to re-apply the blob URL to the freshly-mounted iframe.
   useEffect(() => {
-    if (files.length > 0 && viewMode === 'preview') showPreview(files, previewPage)
-  }, [files, previewPage, deviceSize, viewMode])
+    if (files.length > 0 && viewMode === 'preview') {
+      // When the iframe was just remounted (viewMode flip), force a re-apply by clearing the cache.
+      lastHtmlRef.current = ''
+      showPreview(files, previewPage)
+    }
+  }, [files, previewPage, viewMode])
 
   // Cleanup blob URL on unmount
   useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
@@ -318,35 +331,34 @@ export default function EditorPage() {
               }
               setMessages(prev => [...prev, assistantMsg])
 
-              if (data.fileBlocks && data.fileBlocks.length > 0) {
-                const hasNewFiles = data.fileBlocks.some(
-                  (b: FileBlock) => !filesRef.current.find((f: BuilderFile) => f.path === b.path)
-                )
-
-                if (hasNewFiles) {
-                  // New pages created — reload all files from server to get proper file objects
-                  const freshRes = await fetch(`/api/builder/files/${projectId}`)
-                  if (freshRes.ok) {
-                    const freshFiles: BuilderFile[] = await freshRes.json()
-                    setFiles(freshFiles)
-                    filesRef.current = freshFiles
-                    showPreview(freshFiles, previewPage)
-                  }
-                } else {
-                  // Existing files updated — patch client state
-                  const updatedFiles = filesRef.current.map((f: BuilderFile) => {
-                    const match = data.fileBlocks.find((b: FileBlock) => b.path === f.path)
-                    return match ? { ...f, content: match.content } : f
-                  })
-                  setFiles(updatedFiles)
-                  showPreview(updatedFiles, previewPage)
-                }
-
+              // ALWAYS reload files from server after generation.
+              // This is the source of truth — don't trust the streamed fileBlocks (which can
+              // arrive truncated or be missed if the SSE done event got split). The server
+              // already committed all changes to DB before sending done.
+              const freshRes = await fetch(`/api/builder/files/${projectId}`)
+              if (freshRes.ok) {
+                const freshFiles: BuilderFile[] = await freshRes.json()
+                setFiles(freshFiles)
+                filesRef.current = freshFiles
+                lastHtmlRef.current = '' // force preview rebuild
+                if (viewMode === 'preview') showPreview(freshFiles, previewPage)
+                // Sync activeFile with reloaded version
                 setActiveFile(prev => {
                   if (!prev) return prev
-                  const match = data.fileBlocks.find((b: FileBlock) => b.path === prev.path)
-                  return match ? { ...prev, content: match.content } : prev
+                  return freshFiles.find(f => f.id === prev.id) ?? freshFiles.find(f => f.path === prev.path) ?? prev
                 })
+              }
+
+              // If nothing was applied (no fileBlocks AND no updatedFileIds), warn the user
+              const nothingApplied = (!data.updatedFileIds || data.updatedFileIds.length === 0)
+                && (!data.fileBlocks || data.fileBlocks.length === 0)
+              if (nothingApplied) {
+                setMessages(prev => [...prev, {
+                  id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+                  content: `⚠️ No changes were applied. The AI's response didn't include valid code blocks. Please try rephrasing — for example, "completely rewrite the [section name] with [your changes]".`,
+                  affected_file_ids: null, input_tokens: null, output_tokens: null,
+                  created_at: new Date().toISOString(),
+                }])
               }
             } else if (data.type === 'error') {
               setStreamText('')
@@ -363,48 +375,77 @@ export default function EditorPage() {
               }
               setMessages(prev => [...prev, errMsg])
             }
-          } catch {}
+          } catch (parseErr) {
+            // SSE line failed to parse — log it so we can debug streaming issues
+            console.error('[SSE parse error]', parseErr, 'line length:', line.length, 'preview:', line.slice(0, 100))
+          }
         }
       }
     } catch (err) {
-      console.error(err)
+      console.error('[Stream error]', err)
       setStreamText('')
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+        content: `❌ Connection error: ${err instanceof Error ? err.message : 'Unknown'}. Try again.`,
+        affected_file_ids: null, input_tokens: null, output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
     }
     setGenerating(false)
   }
 
   async function revertTo(snap: Snapshot) {
+    setShowHistory(false)
     const storedList = snap.files as unknown as Array<{ id: string; path: string; content: string }>
-    // Merge stored content back into current file objects (keeps id/mime_type etc)
-    const restoredFiles = filesRef.current.map(f => {
-      const stored = storedList.find(s => s.id === f.id || s.path === f.path)
-      return stored ? { ...f, content: stored.content } : f
-    })
-    setFiles(restoredFiles)
-    filesRef.current = restoredFiles
-    setPreviewPage('index.html')
-    showPreview(restoredFiles, 'index.html')
-    setActiveFile(prev => {
-      if (!prev) return prev
-      return restoredFiles.find(f => f.id === prev.id) ?? prev
-    })
+    if (!storedList || storedList.length === 0) {
+      console.error('[Revert] Snapshot has no files', snap)
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+        content: `⚠️ Can't revert — this snapshot has no saved content.`,
+        affected_file_ids: null, input_tokens: null, output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
+      return
+    }
 
-    // Persist restored content to DB so page reloads keep the reverted state
-    const saves = restoredFiles
-      .filter(f => storedList.some(s => s.id === f.id || s.path === f.path))
-      .map(f =>
-        fetch(`/api/builder/files/${projectId}/${f.id}`, {
+    // Step 1: Persist restored content to DB FIRST (source of truth).
+    // We match by path (more reliable than id, since file objects in snapshot may have stale ids).
+    const saves = storedList
+      .map(stored => {
+        const current = filesRef.current.find(f => f.id === stored.id || f.path === stored.path)
+        if (!current) return null
+        return fetch(`/api/builder/files/${projectId}/${current.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: f.content }),
+          body: JSON.stringify({ content: stored.content }),
         })
-      )
-    await Promise.all(saves)
+      })
+      .filter((p): p is Promise<Response> => p !== null)
 
-    // Remove this snapshot and newer ones from DB + local state
+    const results = await Promise.all(saves)
+    const failedSaves = results.filter(r => !r.ok).length
+    if (failedSaves > 0) {
+      console.error('[Revert] Some file saves failed:', failedSaves)
+    }
+
+    // Step 2: Reload files from DB (single source of truth — don't trust local state)
+    const freshRes = await fetch(`/api/builder/files/${projectId}`)
+    if (freshRes.ok) {
+      const freshFiles: BuilderFile[] = await freshRes.json()
+      setFiles(freshFiles)
+      filesRef.current = freshFiles
+      setPreviewPage('index.html')
+      lastHtmlRef.current = '' // force preview rebuild
+      if (viewMode === 'preview') showPreview(freshFiles, 'index.html')
+      setActiveFile(prev => {
+        if (!prev) return freshFiles.find(f => f.is_entry) ?? freshFiles[0] ?? null
+        return freshFiles.find(f => f.id === prev.id) ?? freshFiles.find(f => f.path === prev.path) ?? prev
+      })
+    }
+
+    // Step 3: Remove this snapshot and newer ones from DB + local state
     await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
     setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
-    setShowHistory(false)
   }
 
   async function saveFileContent(content: string) {

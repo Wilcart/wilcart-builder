@@ -16,7 +16,7 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false 
 
 // Bump this on every deploy so user (and Claude debugging together) can tell
 // which version is actually live in the browser. Visible in the top-right corner.
-const BUILD_VERSION = '2026-04-26_00:39'
+const BUILD_VERSION = '2026-04-26_00:55'
 
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'
@@ -735,6 +735,29 @@ export default function EditorPage() {
             )}
           </div>
 
+          {/* Escape hatch: when the site is broken from accumulated edits and patches
+              fail, this button sends a strong "rewrite the entire file from scratch"
+              prompt that bypasses patch mode entirely. */}
+          {files.length > 0 && !generating && (
+            <div className="px-3 py-2 border-b border-white/[0.06]">
+              <button
+                onClick={() => {
+                  const rewritePrompt = "Rewrite the entire index.html file from scratch. Output the COMPLETE corrected file using <file path=\"index.html\">. Do NOT use <patch>. Use plain <a href=\"#section\"> for in-page anchors and real separate .html files for separate pages. Keep all the existing content, sections, business info, colors and design — just produce a clean valid HTML structure without any showPage/switchPage SPA functions."
+                  setPrompt(rewritePrompt)
+                  // Auto-send so user doesn't have to confirm
+                  setTimeout(() => {
+                    const sendBtn = document.querySelector<HTMLButtonElement>('[data-send-btn]')
+                    sendBtn?.click()
+                  }, 50)
+                }}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-orange-300 bg-orange-500/10 hover:bg-orange-500/15 border border-orange-500/30 hover:border-orange-500/50 rounded-lg transition-all"
+                title="Use when the site is broken or patches keep failing"
+              >
+                🔧 Rewrite from scratch
+              </button>
+            </div>
+          )}
+
           {/* Messages */}
           <div className="flex-1 overflow-y-auto py-4 px-3 space-y-3 scroll-smooth">
             {messages.length === 0 && !streamText && (
@@ -914,6 +937,7 @@ export default function EditorPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-gray-700">⏎ send</span>
                   <button
+                    data-send-btn
                     onClick={sendPrompt}
                     disabled={generating || (!prompt.trim() && !uploadedImage)}
                     className={cn(

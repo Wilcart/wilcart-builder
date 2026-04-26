@@ -257,6 +257,15 @@ function hasRealContent(files: BuilderFile[]): boolean {
   return entry.content.length > 2000 && !entry.content.includes('Start chatting with AI')
 }
 
+// Detect "must rewrite full file" intent — repair-prompt OR existing code has SPA poison
+export function shouldForceFullFile(prompt: string, projectFiles: BuilderFile[]): boolean {
+  const entryFile = projectFiles.find(f => f.path === 'index.html' || f.is_entry)
+  const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo)\b/i.test(prompt)
+    || /(почин|восстанов|сломан|перепиш|сделай заново|сделать заново)/i.test(prompt)
+  const hasSpaPoison = /showPage\s*\(|switchPage\s*\(|navigateTo\s*\(/.test(entryFile?.content ?? '')
+  return repairIntent || hasSpaPoison
+}
+
 export async function* streamGenerate(
   prompt: string,
   projectFiles: BuilderFile[],
@@ -315,15 +324,9 @@ USER REQUEST: ${prompt || 'Update the design to match this screenshot reference'
     // MODE: Edit existing site with text instructions
     systemPrompt = SYSTEM_PROMPT_EDIT
 
-    // Detect "fix the broken site" intent — these prompts must use FULL FILE mode
-    // because patches on broken HTML fail unreliably. Also detect SPA showPage poison
-    // in the current code.
-    const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo|починить|восстанови|почини|сломан|перепиш)/i.test(prompt)
-    const hasSpaPoison = /showPage\s*\(|switchPage\s*\(|navigateTo\s*\(/.test(entryFile?.content ?? '')
-    const forceFullFile = repairIntent || hasSpaPoison
-
+    const forceFullFile = shouldForceFullFile(prompt, projectFiles)
     const repairInstruction = forceFullFile
-      ? `\n\n🔧 IMPORTANT: ${repairIntent ? 'The user is asking you to fix or rewrite the site.' : ''}${hasSpaPoison ? ' The current code contains showPage()/SPA-style navigation that breaks reliably.' : ''} You MUST output the COMPLETE corrected file using <file path="index.html">...</file>. Do NOT use <patch> blocks — they will fail on this code. Rewrite using plain <a href="#section"> for in-page links and real separate .html files for separate pages.`
+      ? `\n\n🔧 IMPORTANT: This site needs a full rewrite — either the user explicitly asked for it, or the current code contains broken SPA-style navigation (showPage/switchPage). You MUST output the COMPLETE file using <file path="index.html">...</file>. Do NOT use <patch> blocks — they will fail on this code. Rewrite using plain <a href="#section"> for in-page links and real separate .html files for separate pages. Output the entire file from <!DOCTYPE html> to </html>.`
       : ''
 
     userMessage = `CURRENT WEBSITE CODE (apply the changes below to this code):

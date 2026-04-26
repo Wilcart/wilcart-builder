@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient as createServerClient } from '@/lib/supabase/server'
 import { createClient } from '@supabase/supabase-js'
-import { streamGenerate, parseFileBlocks, parsePatchBlocks, applyPatches } from '@/lib/builder/claude'
+import { streamGenerate, parseFileBlocks, parsePatchBlocks, applyPatches, shouldForceFullFile } from '@/lib/builder/claude'
 import { checkBuilderAccess } from '@/lib/builder/access'
 
 // Service role client bypasses RLS for file operations
@@ -53,7 +53,17 @@ export async function POST(req: Request) {
         let fileBlocks = parseFileBlocks(fullText)
         const updatedFileIds: string[] = []
 
-        if (patchBlocks.length > 0 && fileBlocks.length === 0) {
+        // SAFETY: If we determined this prompt requires a full rewrite (broken site /
+        // showPage poison), but Claude returned only patches, REJECT the patches and
+        // tell the user to use the "Rewrite from scratch" button. Patches on broken
+        // code never apply cleanly and the user just sees "I fixed it" with no change.
+        const mustBeFullFile = shouldForceFullFile(prompt, files ?? [])
+        if (mustBeFullFile && patchBlocks.length > 0 && fileBlocks.length === 0) {
+          const errMsg = `\n\n⚠️ This site has broken structure (likely from earlier edits with showPage navigation). I tried to patch it but patches don't work on broken code. Please click the **🔧 Rewrite from scratch** button at the top of the chat to have me rewrite the file completely.`
+          fullText += errMsg
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'delta', text: errMsg })}\n\n`))
+          // Skip patch application — fall through to save assistant message and done
+        } else if (patchBlocks.length > 0 && fileBlocks.length === 0) {
           // PATCH MODE — apply surgical changes to existing files
           const entryFile = (files ?? []).find(f => f.path === 'index.html' || f.is_entry)
           if (entryFile) {
@@ -69,6 +79,11 @@ export async function POST(req: Request) {
               if (failed.length > 0) {
                 console.warn('[Patch] Failed to apply', failed.length, 'patch(es):', failed)
               }
+            } else {
+              // Patches all failed — visible warning so user knows nothing changed
+              const errMsg = `\n\n⚠️ Patch didn't match the current code (no changes applied). Click the **🔧 Rewrite from scratch** button to have me rewrite the file completely.`
+              fullText += errMsg
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'delta', text: errMsg })}\n\n`))
             }
           }
         } else {

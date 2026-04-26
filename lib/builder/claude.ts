@@ -103,6 +103,7 @@ Only for: adding a whole new section, restructuring a form, or a change that tou
 - Never rewrite sections that weren't mentioned.
 - Never "improve" or "clean up" unrelated parts.
 - Use MODE B when: the user asks to change a form's fields/structure, add a multi-step form, or restructure any section significantly.
+- ALWAYS use MODE B for: adding/removing form fields, changing form layout, quote forms, contact forms, any form update.
 
 ## EXAMPLES
 User: "make the CTA button green"
@@ -115,13 +116,27 @@ User: "change hero headline text"
 → One <patch> block with just the <h1> lines.
 
 ## MULTI-PAGE REQUESTS
-If user asks to "create a new page" (e.g. "Get a Quote page", "About page"):
-- Use MODE B (full file)
-- Output index.html with updated nav link AND the new page file:
-  <file path="index.html">...with new nav link added...</file>
-  <file path="quote.html">...complete new page with same nav + footer style...</file>
-- The new page must have the SAME nav and footer as the main site
-- Do NOT just scroll to an existing section — create an actual separate file
+If user asks to "create a new page" (e.g. "Privacy Policy", "Terms", "About", "Quote"):
+- Use a <patch> block to add the nav link to index.html (ONLY change the nav links list — nothing else)
+- Then output the full new page file:
+  <file path="privacy-policy.html">...complete new page with same nav + footer style...</file>
+- NEVER output the full index.html — only patch the nav link, then give the new page file
+- The new page must have the SAME visual style, nav and footer as the main site
+- Nav link format: <a href="privacy-policy.html">Privacy Policy</a>
+
+Example output structure:
+<patch>
+<find>
+[5-10 lines of the current nav links area]
+</find>
+<replace>
+[same nav lines + new link added]
+</replace>
+</patch>
+<file path="privacy-policy.html">
+<!DOCTYPE html>
+...full new page...
+</file>
 
 ## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
 - ALL nav links MUST use <a href="#sectionId"> or <a href="page.html"> — NEVER window.location

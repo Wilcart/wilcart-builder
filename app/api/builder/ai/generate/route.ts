@@ -48,13 +48,44 @@ export async function POST(req: Request) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'delta', text: chunk })}\n\n`))
         }
 
-        // ── Determine what Claude produced: patches or full file blocks ──────
+        // ── Determine what Claude produced: patches and/or full file blocks ──
         const patchBlocks = parsePatchBlocks(fullText)
         let fileBlocks = parseFileBlocks(fullText)
         const updatedFileIds: string[] = []
 
-        if (patchBlocks.length > 0 && fileBlocks.length === 0) {
-          // PATCH MODE — apply surgical changes to existing files
+        // Helper: save a new or existing file block to DB
+        async function saveFileBlock(block: { path: string; content: string }) {
+          const existing = (files ?? []).find(f => f.path === block.path)
+          if (existing) {
+            await admin
+              .from('builder_files')
+              .update({ content: block.content, size_bytes: block.content.length, updated_at: new Date().toISOString() })
+              .eq('id', existing.id)
+            updatedFileIds.push(existing.id)
+          } else {
+            const { data: newFile } = await admin
+              .from('builder_files')
+              .insert({
+                project_id: projectId,
+                org_id: orgId,
+                path: block.path,
+                name: block.path.split('/').pop() ?? block.path,
+                mime_type: block.path.endsWith('.css') ? 'text/css'
+                  : block.path.endsWith('.js') ? 'text/javascript'
+                  : 'text/html',
+                content: block.content,
+                size_bytes: block.content.length,
+                is_entry: block.path === 'index.html',
+              })
+              .select()
+              .single()
+            if (newFile) updatedFileIds.push(newFile.id)
+          }
+        }
+
+        if (patchBlocks.length > 0) {
+          // PATCH MODE (possibly mixed with new file blocks)
+          // Apply patches to the entry file (index.html)
           const entryFile = (files ?? []).find(f => f.path === 'index.html' || f.is_entry)
           if (entryFile) {
             const { result, applied, failed } = applyPatches(entryFile.content, patchBlocks)
@@ -64,47 +95,36 @@ export async function POST(req: Request) {
                 .update({ content: result, size_bytes: result.length, updated_at: new Date().toISOString() })
                 .eq('id', entryFile.id)
               updatedFileIds.push(entryFile.id)
-              // Return the patched file as a fileBlock so frontend can update the preview
-              fileBlocks = [{ path: entryFile.path, content: result }]
+              // Add patched index.html to fileBlocks so frontend gets updated content
+              const alreadyIncluded = fileBlocks.some(b => b.path === entryFile.path)
+              if (!alreadyIncluded) {
+                fileBlocks = [{ path: entryFile.path, content: result }, ...fileBlocks]
+              }
               if (failed.length > 0) {
                 console.warn('[Patch] Failed to apply', failed.length, 'patch(es):', failed)
-                fullText += `\n\n⚠️ ${failed.length} change(s) couldn't be applied automatically. Please ask me to **rewrite that section completely** if you don't see the update.`
+                const warning = `\n\n⚠️ ${failed.length} change(s) couldn't be applied automatically. Please ask me to **rewrite that section completely** if you don't see the update.`
+                fullText += warning
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'delta', text: warning })}\n\n`))
               }
             } else {
               // All patches failed — nothing changed, warn the user
               console.warn('[Patch] All patches failed:', failed)
-              fullText += `\n\n⚠️ I couldn't apply the changes — the code structure didn't match my patch. Please tell me to **completely rewrite** that section and I'll redo it from scratch.`
+              const warning = `\n\n⚠️ I couldn't apply the changes — the code structure didn't match. Please tell me to **completely rewrite that section** and I'll redo it from scratch.`
+              fullText += warning
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'delta', text: warning })}\n\n`))
             }
           }
-        } else {
-          // FULL FILE MODE — replace entire file content
+
+          // Save any new page file blocks (e.g. privacy-policy.html) alongside the patch
+          for (const block of fileBlocks.filter(b => b.path !== 'index.html' && !(files ?? []).find(f => f.path === b.path))) {
+            await saveFileBlock(block)
+          }
+        }
+
+        if (patchBlocks.length === 0) {
+          // FULL FILE MODE — replace entire file content (no patches at all)
           for (const block of fileBlocks) {
-            const existing = (files ?? []).find(f => f.path === block.path)
-            if (existing) {
-              await admin
-                .from('builder_files')
-                .update({ content: block.content, size_bytes: block.content.length, updated_at: new Date().toISOString() })
-                .eq('id', existing.id)
-              updatedFileIds.push(existing.id)
-            } else {
-              const { data: newFile } = await admin
-                .from('builder_files')
-                .insert({
-                  project_id: projectId,
-                  org_id: orgId,
-                  path: block.path,
-                  name: block.path.split('/').pop() ?? block.path,
-                  mime_type: block.path.endsWith('.css') ? 'text/css'
-                    : block.path.endsWith('.js') ? 'text/javascript'
-                    : 'text/html',
-                  content: block.content,
-                  size_bytes: block.content.length,
-                  is_entry: block.path === 'index.html',
-                })
-                .select()
-                .single()
-              if (newFile) updatedFileIds.push(newFile.id)
-            }
+            await saveFileBlock(block)
           }
         }
 

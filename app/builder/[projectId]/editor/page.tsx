@@ -79,10 +79,11 @@ export default function EditorPage() {
     if (iframeRef.current) iframeRef.current.src = url
   }
 
-  // Rebuild preview whenever files or active page changes
+  // Rebuild preview whenever files, active page, or device size changes
+  // deviceSize triggers iframe remount (different JSX structure), so src must be reapplied
   useEffect(() => {
     if (files.length > 0) showPreview(files, previewPage)
-  }, [files, previewPage])
+  }, [files, previewPage, deviceSize])
 
   // Cleanup blob URL on unmount
   useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
@@ -283,12 +284,17 @@ export default function EditorPage() {
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
       let accumulated = ''
+      let sseBuffer = ''
 
       while (reader) {
         const { done, value } = await reader.read()
         if (done) break
-        const text = decoder.decode(value)
-        const lines = text.split('\n')
+        sseBuffer += decoder.decode(value, { stream: true })
+        // Process only complete SSE lines (split on \n\n to get full events)
+        const parts = sseBuffer.split('\n\n')
+        // Last part may be incomplete — keep it in buffer
+        sseBuffer = parts.pop() ?? ''
+        const lines = parts.flatMap(p => p.split('\n'))
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           try {
@@ -367,19 +373,33 @@ export default function EditorPage() {
   }
 
   async function revertTo(snap: Snapshot) {
+    const storedList = snap.files as unknown as Array<{ id: string; path: string; content: string }>
     // Merge stored content back into current file objects (keeps id/mime_type etc)
     const restoredFiles = filesRef.current.map(f => {
-      const stored = (snap.files as unknown as Array<{ id: string; path: string; content: string }>)
-        .find(s => s.id === f.id || s.path === f.path)
+      const stored = storedList.find(s => s.id === f.id || s.path === f.path)
       return stored ? { ...f, content: stored.content } : f
     })
     setFiles(restoredFiles)
     filesRef.current = restoredFiles
+    setPreviewPage('index.html')
     showPreview(restoredFiles, 'index.html')
     setActiveFile(prev => {
       if (!prev) return prev
       return restoredFiles.find(f => f.id === prev.id) ?? prev
     })
+
+    // Persist restored content to DB so page reloads keep the reverted state
+    const saves = restoredFiles
+      .filter(f => storedList.some(s => s.id === f.id || s.path === f.path))
+      .map(f =>
+        fetch(`/api/builder/files/${projectId}/${f.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: f.content }),
+        })
+      )
+    await Promise.all(saves)
+
     // Remove this snapshot and newer ones from DB + local state
     await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
     setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))

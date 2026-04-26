@@ -3,222 +3,119 @@ import type { BuilderFile } from '@/types/builder'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-// ─── CREATE MODE: Building a new site from scratch ───────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SYSTEM PROMPTS
+//
+// Architectural decision (2026-04-26): we ALWAYS produce the complete file.
+// No patch blocks. No surgical edits. No mode-switching heuristics. This is
+// what bolt.new / v0 / lovable do — it's slower per edit but eliminates the
+// entire class of "patch failed silently and Claude lied about it" bugs that
+// plagued earlier versions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COMMON_RULES = `
+## OUTPUT FORMAT (mandatory — non-negotiable)
+Wrap your HTML in a <file> tag with the path attribute:
+<file path="index.html">
+<!DOCTYPE html>
+<html>...complete file from <!DOCTYPE> to </html>...</html>
+</file>
+
+NEVER output partial code, snippets, diffs, or <patch> blocks. ALWAYS the full file.
+For separate pages (privacy, terms, about) output additional <file path="X.html"> blocks.
+
+## NAVIGATION (preview will break otherwise)
+- Use ONLY plain anchor links: <a href="#sectionId"> for in-page scroll, <a href="page.html"> for separate pages
+- NEVER use window.location, location.href, location.assign
+- NEVER use onclick="window.location.href='...'" or similar JS navigation
+- NEVER write JS functions like showPage(), switchPage(), navigateTo() that toggle display:none on page divs — these BREAK reliably
+- Hamburger menu JS may only toggle visibility of the menu container itself
+- For multi-section single-page sites: use <section id="x"> + <a href="#x"> + CSS scroll-behavior:smooth
+- For separate pages: create real .html files, link with <a href="filename.html">
+
+## DESIGN STANDARD
+- Tailwind CSS via CDN: https://cdn.tailwindcss.com
+- Font Awesome 6: https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css
+- Google Fonts (Inter): preconnect + import
+- Glass-morphism cards: background:rgba(255,255,255,0.05);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);border-radius:16px
+- Mobile responsive on EVERY layout: sm: md: lg: prefixes, never fixed sizes without breakpoints
+- Smooth animations: Intersection Observer for fade-in, hover transitions
+- scroll-behavior:smooth on html element
+
+## COLOR PALETTES (pick by industry, default to green)
+- Plumbing/HVAC: #1e3a8a → #3b82f6 (blue)
+- Cleaning: #065f46 → #10b981 (green)
+- Moving: #0f172a + #22c55e (dark + green) — DEFAULT
+- Landscaping: #14532d → #22c55e (deep green)
+- Electrical: #713f12 → #eab308 (amber)
+- Restaurant: #7f1d1d → #ef4444 (red)
+
+## COMPACT HTML (saves tokens)
+- No HTML comments
+- No blank lines between tags
+- Inline short styles
+- Concise variable names in JS
+
+## RESPONSE FORMAT
+Start with ONE short sentence describing what you built or changed.
+Then output the <file> block(s).
+NOTHING after the last </file>.`
+
 const SYSTEM_PROMPT_CREATE = `You are Wilcart Builder — an elite AI web designer creating stunning websites for service businesses.
 
-## OUTPUT FORMAT
-<file path="index.html">
-<!DOCTYPE html>
-...complete file...
-</file>
+Build a complete single-page website with all 9 sections in this exact order:
 
-NEVER truncate. NEVER stop early. Output the FULL file every time.
+1. **Nav** — sticky/fixed, logo + links + "Get Quote" CTA, hamburger on mobile
+2. **Hero** — min-height:100vh, gradient/radial background, headline (text-4xl md:text-6xl), subheadline, 2 CTA buttons, trust badges row
+3. **Services** — 3-6 glass-morphism cards in a responsive grid, each with icon + title + description + check-list
+4. **Stats** — 4 counter cards: years experience / customers served / rating / completed projects
+5. **How It Works** — 3 numbered steps in cards
+6. **Testimonials** — 3 cards: 5 stars + quote + customer name + role
+7. **FAQ** — 4 accordion items with click-to-expand (small JS)
+8. **Contact** — contact info card (phone/email/address) + form (name, email, phone, service select, message, submit)
+9. **Footer** — logo+tagline+social icons / Quick Links / Services links / Contact info / © year + Privacy/Terms links
 
-## COMPACT HTML (critical — saves tokens so you can fit everything)
-- No HTML comments (<!-- -->)
-- No blank lines between tags
-- Inline short styles where possible
-- Keep JS concise — no verbose variable names
+⚠️ The site is INCOMPLETE without all 9 sections including the Footer. Budget tokens — keep sections concise so the footer always fits.
 
-## REQUIRED SECTIONS (all 9, in this exact order — ALL are mandatory)
-1. Nav — sticky, logo text + links + "Get Quote" CTA button, hamburger on mobile
-2. Hero — min-height:100vh, gradient bg, h1 (4rem) + subheadline + 2 CTA buttons + trust badges
-3. Services — 3 glass-morphism cards (backdrop-filter:blur(12px)) in grid, icon + title + desc
-4. Stats — 4 counters: Years / Clients / Rating / Projects
-5. How It Works — 3 numbered steps
-6. Testimonials — 3 cards with stars, quote, name
-7. FAQ — 4 accordion items (JS toggle)
-8. Contact — form (name, email, phone, message) + contact info
-9. Footer — logo, links, social icons, copyright ← ALWAYS LAST, ALWAYS INCLUDED
+${COMMON_RULES}`
 
-## ⚠️ FOOTER RULE
-The site is INCOMPLETE without the Footer. Budget tokens early — write concise sections 1–8 so section 9 always fits. Never end the file at Contact or FAQ.
+const SYSTEM_PROMPT_EDIT = `You are Wilcart Builder — modifying an existing website to match the user's request.
 
-## DESIGN
-- Hero: rich CSS gradient + overlay pattern
-- Glass cards: background:rgba(255,255,255,0.07);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.12);border-radius:16px
-- Google Font (Inter), Tailwind CSS CDN, Font Awesome 6 CDN
-- Intersection Observer fade-in, hover animations, mobile responsive
+You will receive the complete current HTML and a user request. Your job:
 
-## COLOR PALETTES
-- Plumbing/HVAC: #1e3a8a→#3b82f6 | Cleaning: #065f46→#10b981 | Moving: #92400e→#f59e0b
-- Landscaping: #14532d→#22c55e | Electrical: #713f12→#eab308 | Default: #0f172a + #22c55e
+1. Read the current code carefully
+2. Apply the user's requested change
+3. Output the COMPLETE updated file from <!DOCTYPE html> to </html>
 
-## MULTI-PAGE SITES
-If asked for a separate page (About, Contact, Quote, etc.), output MULTIPLE file blocks:
-<file path="index.html">...updated index with nav link...</file>
-<file path="about.html">...full about page with same nav + footer...</file>
+Keep everything else identical to the current code — same business name, contact info, sections, colors, structure. Change ONLY what the user asked for.
 
-## MOBILE RESPONSIVENESS (mandatory)
-- Use Tailwind responsive prefixes on EVERY layout: sm:, md:, lg:
-- Nav: hamburger menu on mobile (hidden md:flex for desktop links)
-- Grid: grid-cols-1 md:grid-cols-2 lg:grid-cols-3
-- Text: text-3xl md:text-5xl (never fixed large sizes without md: prefix)
-- Padding: px-4 md:px-8 lg:px-16
-- Test mentally: does this look good at 390px width?
+If the user asks to "fix", "rewrite", "rebuild" or the current code looks broken (duplicates, malformed tags, showPage poison): produce a clean fresh version using the same business info but a corrected structure.
 
-## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
-- ALL nav links MUST be plain <a href="#sectionId"> for in-page scroll OR <a href="page.html"> for separate pages
-- NEVER use window.location, location.href, or location.assign for navigation
-- NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
-- NEVER use SPA-style page switching with showPage(), switchPage(), navigateTo(), or any JS function that toggles display:none on multiple page divs. This pattern breaks reliably (function name vs section id mismatches, missing handlers, etc.)
-- For an "About" or "Services" section in the SAME page → put it as a <section id="about"> on the page, link with <a href="#about">
-- For a SEPARATE About page → create a real <file path="about.html"> and link with <a href="about.html">
-- Hamburger menu: JS only toggles show/hide of the menu container — links inside are normal <a> tags
-- Smooth scroll: use CSS scroll-behavior:smooth on html, not JS scroll
+${COMMON_RULES}`
 
-## RESPONSE
-One sentence describing what you built, then the <file> block(s). Nothing after the last </file>.`
+const SYSTEM_PROMPT_SCREENSHOT = `You are Wilcart Builder — recreating a website design from a screenshot.
 
-// ─── EDIT MODE: Modifying an existing site ────────────────────────────────────
-const SYSTEM_PROMPT_EDIT = `You are Wilcart Builder — an AI that makes precise, minimal edits to existing websites.
-
-## TWO OUTPUT MODES — pick based on the request:
-
-### MODE A — PATCH (use for 90% of requests)
-For any small change: color, text, logo, button, icon, font, single element.
-Output ONLY the changed lines, not the whole file:
-
-<patch>
-<find>
-[copy 5–15 lines from the CURRENT CODE that contain the element to change — must be unique in the file]
-</find>
-<replace>
-[same lines with ONLY the requested change applied — everything else byte-for-byte identical]
-</replace>
-</patch>
-
-You can use multiple <patch> blocks if the change affects multiple spots.
-
-### MODE B — FULL FILE (use only when necessary)
-Only for: adding a whole new section, or a change that touches 5+ separate places.
-
-<file path="index.html">
-<!DOCTYPE html>
-...complete modified file...
-</file>
-
-### 🔧 ALWAYS USE MODE B (FULL FILE) WHEN:
-- User says the site is "broken", asks to "fix", "repair", "restore", "rewrite", "redo", or any similar repair intent
-- The current code contains showPage(), switchPage(), or any SPA-style display toggling — REWRITE without these patterns, using real <a href="#section"> anchors or real separate page files
-- The current code has duplicate sections, malformed tags, or visibly broken structure
-- You're unsure your patch will match cleanly — better to rewrite the whole file than ship a failed patch
-NEVER attempt to surgically patch a broken file. Patches require the surrounding code to be intact and unique. If the file is in a bad state, output the full corrected file instead.
-
-## RULES
-- Default to MODE A (patch). Most requests = one patch block.
-- The <find> text MUST exist verbatim in the current code — copy it exactly, including indentation.
-- Only change what the user asked. Inside <replace>, keep everything else identical.
-- Never rewrite sections that weren't mentioned.
-- Never "improve" or "clean up" unrelated parts.
-
-## EXAMPLES
-User: "make the CTA button green"
-→ One <patch> block changing only the button's color class.
-
-User: "add a logo in the nav"
-→ One <patch> block replacing the nav logo text/area only.
-
-User: "change hero headline text"
-→ One <patch> block with just the <h1> lines.
-
-## MULTI-PAGE REQUESTS
-If user asks to "create a new page" (e.g. "Get a Quote page", "About page"):
-- Use MODE B (full file)
-- Output index.html with updated nav link AND the new page file:
-  <file path="index.html">...with new nav link added...</file>
-  <file path="quote.html">...complete new page with same nav + footer style...</file>
-- The new page must have the SAME nav and footer as the main site
-- Do NOT just scroll to an existing section — create an actual separate file
-
-## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
-- ALL nav links MUST be plain <a href="#sectionId"> or <a href="page.html"> — NEVER window.location
-- NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
-- NEVER add showPage(), switchPage(), navigateTo() or any SPA-style JS that toggles display:none on page divs. If the user asks for a new "page", create a real separate .html file. If they want a section, use <section id="x"> + <a href="#x">.
-- Hamburger menu JS: only toggles visibility of the menu container — never sets window.location or location.href
-
-## RESPONSE
-One sentence describing the change, then your patch or file block(s).`
-
-// ─── SCREENSHOT COPY MODE ─────────────────────────────────────────────────────
-const SYSTEM_PROMPT_SCREENSHOT = `You are Wilcart Builder — an AI web designer that recreates website designs from screenshots.
-
-## YOUR JOB
-Study the screenshot carefully and recreate it as a complete, functional HTML website.
-
-## WHAT TO ANALYZE IN THE SCREENSHOT
-- Overall layout and section structure
-- Color scheme (exact colors, gradients, backgrounds)
-- Typography (font sizes, weights, hierarchy)
-- Navigation style and links
-- Hero section design and content
-- All visible sections and their content
+Study the screenshot carefully:
+- Layout & section structure
+- Color scheme (extract exact colors)
+- Typography hierarchy
+- Navigation
+- Section content
 - Card styles, spacing, shadows
-- Buttons, icons, decorative elements
+- Buttons, icons
 - Footer structure
 
-## OUTPUT FORMAT
-<file path="index.html">
-<!DOCTYPE html>
-...complete file that matches the screenshot...
-</file>
+Recreate it as a complete functional website with realistic placeholder content matching the business type shown.
 
-## RULES
-- Match the visual design as closely as possible
-- Use Tailwind CSS CDN + Font Awesome 6 CDN + Google Fonts for the same look
-- Fill in realistic placeholder content matching the business type shown
-- Make it fully functional and mobile responsive
-- Output the COMPLETE file — never truncate
+${COMMON_RULES}`
 
-## RESPONSE
-One sentence describing the design you recreated, then the <file> block. Nothing after </file>.`
+// ─────────────────────────────────────────────────────────────────────────────
+// PARSING & VALIDATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface FileBlock {
   path: string
   content: string
-}
-
-export interface PatchBlock {
-  find: string
-  replace: string
-}
-
-export function parsePatchBlocks(text: string): PatchBlock[] {
-  const blocks: PatchBlock[] = []
-  const regex = /<patch>\s*<find>([\s\S]*?)<\/find>\s*<replace>([\s\S]*?)<\/replace>\s*<\/patch>/g
-  let match
-  while ((match = regex.exec(text)) !== null) {
-    blocks.push({ find: match[1], replace: match[2] })
-  }
-  return blocks
-}
-
-export function applyPatches(html: string, patches: PatchBlock[]): { result: string; applied: number; failed: string[] } {
-  let result = html
-  let applied = 0
-  const failed: string[] = []
-
-  for (const { find, replace } of patches) {
-    const trimFind = find.trim()
-    const trimReplace = replace.trim()
-    if (result.includes(trimFind)) {
-      result = result.replace(trimFind, trimReplace)
-      applied++
-    } else {
-      // Try collapsing whitespace differences
-      const normalizeWs = (s: string) => s.replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n')
-      const normResult = normalizeWs(result)
-      const normFind = normalizeWs(trimFind)
-      if (normResult.includes(normFind)) {
-        // Rebuild result with the normalized replacement
-        result = normResult.replace(normFind, normalizeWs(trimReplace))
-        applied++
-      } else {
-        failed.push(trimFind.slice(0, 80))
-      }
-    }
-  }
-  return { result, applied, failed }
 }
 
 export function parseFileBlocks(text: string): FileBlock[] {
@@ -229,7 +126,7 @@ export function parseFileBlocks(text: string): FileBlock[] {
     blocks.push({ path: match[1].trim(), content: match[2].trim() })
   }
 
-  // Fallback 1: unclosed <file> tag (response cut off)
+  // Fallback 1: unclosed <file> tag (response cut off — shouldn't happen with 32k tokens but be safe)
   if (blocks.length === 0) {
     const openMatch = text.match(/<file path="([^"]+)">([\s\S]+)/)
     if (openMatch) {
@@ -237,7 +134,7 @@ export function parseFileBlocks(text: string): FileBlock[] {
     }
   }
 
-  // Fallback 2: raw HTML
+  // Fallback 2: raw HTML without <file> wrapper
   if (blocks.length === 0) {
     const htmlMatch = text.match(/<!DOCTYPE html[\s\S]*/i) ||
                       text.match(/<html[\s\S]*/i) ||
@@ -250,30 +147,42 @@ export function parseFileBlocks(text: string): FileBlock[] {
   return blocks
 }
 
+// Reject any output that contains forbidden SPA-style navigation patterns.
+// These break the iframe preview reliably and accumulate junk over edits.
+export function detectForbiddenPatterns(content: string): string[] {
+  const violations: string[] = []
+  if (/showPage\s*\(/i.test(content)) violations.push('showPage()')
+  if (/switchPage\s*\(/i.test(content)) violations.push('switchPage()')
+  if (/navigateTo\s*\(/i.test(content)) violations.push('navigateTo()')
+  if (/onclick=["'][^"']*window\.location/i.test(content)) violations.push('onclick="window.location"')
+  if (/onclick=["'][^"']*location\.href/i.test(content)) violations.push('onclick="location.href"')
+  return violations
+}
+
+// Detect a complete HTML doc — must have <html>, <body>, and reasonable size
+export function isReasonableHtml(content: string): { ok: boolean; reason?: string } {
+  if (content.length < 1500) return { ok: false, reason: 'too short (likely truncated)' }
+  if (content.length > 80000) return { ok: false, reason: 'too large (>80KB, likely accumulated junk)' }
+  if (!/<html/i.test(content)) return { ok: false, reason: 'missing <html> tag' }
+  if (!/<body/i.test(content)) return { ok: false, reason: 'missing <body> tag' }
+  if (!/<\/html>/i.test(content)) return { ok: false, reason: 'missing </html> closing tag' }
+  if (!/<\/body>/i.test(content)) return { ok: false, reason: 'missing </body> closing tag' }
+  return { ok: true }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODE SELECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
 function hasRealContent(files: BuilderFile[]): boolean {
   const entry = files.find(f => f.path === 'index.html' || f.is_entry)
   if (!entry) return false
-  // Default placeholder content is short and contains "Start chatting"
   return entry.content.length > 2000 && !entry.content.includes('Start chatting with AI')
 }
 
-// Detect "must rewrite full file" intent — repair-prompt OR existing code has SPA poison
-export function shouldForceFullFile(prompt: string, projectFiles: BuilderFile[]): boolean {
-  const entryFile = projectFiles.find(f => f.path === 'index.html' || f.is_entry)
-  const repairIntent = /\b(fix|broken|repair|restore|rewrite|redo|rebuild)\b/i.test(prompt)
-    || /(почин|восстанов|сломан|перепиш|сделай заново|сделать заново|пересобр)/i.test(prompt)
-  const hasSpaPoison = /showPage\s*\(|switchPage\s*\(|navigateTo\s*\(/.test(entryFile?.content ?? '')
-  return repairIntent || hasSpaPoison
-}
-
-// Detect "FULL REBUILD" intent — like clicking the orange Rewrite-from-scratch button.
-// When true, use CREATE prompt + extracted business info instead of EDIT prompt with patches.
-export function isFullRebuildIntent(prompt: string): boolean {
-  return /\bREBUILD\b/.test(prompt)  // explicit marker from the Rewrite-from-scratch button
-    || /rewrite the entire (site|website|index)/i.test(prompt)
-    || /перепиши (весь|всё|сайт)/i.test(prompt)
-    || /пересобрать (весь|всё|сайт)/i.test(prompt)
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// STREAM GENERATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function* streamGenerate(
   prompt: string,
@@ -284,12 +193,10 @@ export async function* streamGenerate(
   const existingContent = hasRealContent(projectFiles)
   const entryFile = projectFiles.find(f => f.path === 'index.html' || f.is_entry)
 
-  // ── Determine mode ──────────────────────────────────────────────────────────
   let systemPrompt: string
   let userMessage: Anthropic.MessageParam['content']
 
   if (image && !existingContent) {
-    // MODE: Copy design from screenshot (no existing site yet)
     systemPrompt = SYSTEM_PROMPT_SCREENSHOT
     userMessage = [
       {
@@ -305,9 +212,7 @@ export async function* streamGenerate(
         text: `Recreate this website design as a complete HTML file.\n${prompt ? `Additional instructions: ${prompt}` : ''}`,
       },
     ]
-
   } else if (image && existingContent) {
-    // MODE: Modify existing site using screenshot as reference
     systemPrompt = SYSTEM_PROMPT_EDIT
     userMessage = [
       {
@@ -320,76 +225,52 @@ export async function* streamGenerate(
       },
       {
         type: 'text',
-        text: `CURRENT WEBSITE CODE (modify this based on the screenshot and instructions below):
-<file path="index.html">
-${entryFile?.content ?? ''}
-</file>
-
-USER REQUEST: ${prompt || 'Update the design to match this screenshot reference'}`,
+        text: `CURRENT WEBSITE CODE:\n<file path="index.html">\n${entryFile?.content ?? ''}\n</file>\n\nUSER REQUEST: ${prompt || 'Update the design to match this screenshot reference'}\n\nOutput the COMPLETE updated file.`,
       },
     ]
-
-  } else if (existingContent && isFullRebuildIntent(prompt)) {
-    // MODE: Full rebuild — use CREATE prompt (with all 9 sections) + business info from old code.
-    // This bypasses EDIT mode entirely so Claude doesn't get tempted to patch.
-    systemPrompt = SYSTEM_PROMPT_CREATE
-
-    // Strip the existing code to a compact business-info summary so Claude has
-    // context (name, phone, services, colors) without being influenced by broken HTML.
-    const oldCode = entryFile?.content ?? ''
-    userMessage = `Build a complete fresh website. Use the business information from the existing code below as your reference (business name, contact info, service descriptions, color scheme, industry). Do NOT copy the existing HTML structure — generate a clean new one with all 9 standard sections. Do NOT include any showPage/switchPage SPA functions.
-
-EXISTING CODE (reference only — for business info, NOT structure):
-\`\`\`html
-${oldCode.length > 12000 ? oldCode.slice(0, 6000) + '\n...[truncated]...\n' + oldCode.slice(-3000) : oldCode}
-\`\`\`
-
-USER REQUEST: ${prompt}`
-
   } else if (existingContent) {
-    // MODE: Edit existing site with text instructions
     systemPrompt = SYSTEM_PROMPT_EDIT
-
-    const forceFullFile = shouldForceFullFile(prompt, projectFiles)
-    const repairInstruction = forceFullFile
-      ? `\n\n🔧 IMPORTANT: This site needs a full rewrite — either the user explicitly asked for it, or the current code contains broken SPA-style navigation (showPage/switchPage). You MUST output the COMPLETE file using <file path="index.html">...</file>. Do NOT use <patch> blocks — they will fail on this code. Rewrite using plain <a href="#section"> for in-page links and real separate .html files for separate pages. Output the entire file from <!DOCTYPE html> to </html>.`
-      : ''
-
-    userMessage = `CURRENT WEBSITE CODE (apply the changes below to this code):
+    userMessage = `CURRENT WEBSITE CODE:
 <file path="index.html">
 ${entryFile?.content ?? ''}
 </file>
 
-USER REQUEST: ${prompt}${repairInstruction}
+USER REQUEST: ${prompt}
 
-Remember: ONLY change what the user asked for. Keep everything else exactly the same.`
-
+Output the COMPLETE updated file with the user's change applied. Keep all other content identical.`
   } else {
-    // MODE: Create new site from scratch
     systemPrompt = SYSTEM_PROMPT_CREATE
     userMessage = prompt
   }
 
-  // ── Build message history ───────────────────────────────────────────────────
-  // For edit mode, we include the current code in the user message directly,
-  // so we don't need many history messages (they'd just add noise)
-  const historyLimit = existingContent ? 2 : 4
+  // Strip code blocks from history so we don't waste tokens (and confuse Claude)
+  // by sending the same long HTML twice. We send the current code in the user message.
+  const history = conversationHistory.slice(-3).map(m => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.role === 'assistant'
+      ? (m.content
+          .replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '[previous version]')
+          .trim() || '[generated]')
+      : m.content,
+  }))
+
   const messages: Anthropic.MessageParam[] = [
-    ...conversationHistory.slice(-historyLimit).map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.role === 'assistant'
-        ? m.content
-            .replace(/<file path="[^"]+">[\s\S]*?<\/file>/g, '[previous code — see current code in next message]')
-            .trim() || '[generated code]'
-        : m.content,
-    })),
+    ...history,
     { role: 'user', content: userMessage },
   ]
 
+  // Prompt caching: cache the system prompt (saves 90% on repeated requests within 5 min)
+  // The system field accepts an array of cached blocks since Claude API 2024-08-01
   const stream = anthropic.messages.stream({
     model: 'claude-sonnet-4-5',
-    max_tokens: 16000,
-    system: systemPrompt,
+    max_tokens: 32000,
+    system: [
+      {
+        type: 'text',
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
     messages,
   })
 

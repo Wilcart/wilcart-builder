@@ -16,7 +16,7 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false 
 
 // Bump this on every deploy so user (and Claude debugging together) can tell
 // which version is actually live in the browser. Visible in the top-right corner.
-const BUILD_VERSION = '2026-04-26_10:35'
+const BUILD_VERSION = '2026-04-26_C1' // Commit 1: kill patches
 
 type ViewMode = 'preview' | 'code'
 type DeviceSize = 'desktop' | 'tablet' | 'mobile'

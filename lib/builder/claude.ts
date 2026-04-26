@@ -58,12 +58,14 @@ If asked for a separate page (About, Contact, Quote, etc.), output MULTIPLE file
 - Test mentally: does this look good at 390px width?
 
 ## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
-- ALL nav links MUST use <a href="#sectionId"> for in-page scroll OR <a href="page.html"> for pages
+- ALL nav links MUST be plain <a href="#sectionId"> for in-page scroll OR <a href="page.html"> for separate pages
 - NEVER use window.location, location.href, or location.assign for navigation
 - NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
-- Hamburger menu: JS only toggles show/hide of the menu — links inside use <a> tags
+- NEVER use SPA-style page switching with showPage(), switchPage(), navigateTo(), or any JS function that toggles display:none on multiple page divs. This pattern breaks reliably (function name vs section id mismatches, missing handlers, etc.)
+- For an "About" or "Services" section in the SAME page → put it as a <section id="about"> on the page, link with <a href="#about">
+- For a SEPARATE About page → create a real <file path="about.html"> and link with <a href="about.html">
+- Hamburger menu: JS only toggles show/hide of the menu container — links inside are normal <a> tags
 - Smooth scroll: use CSS scroll-behavior:smooth on html, not JS scroll
-- SPA-style hidden sections: OK to show/hide divs, but use <a href="#id"> to trigger, not window.location
 
 ## RESPONSE
 One sentence describing what you built, then the <file> block(s). Nothing after the last </file>.`
@@ -123,9 +125,10 @@ If user asks to "create a new page" (e.g. "Get a Quote page", "About page"):
 - Do NOT just scroll to an existing section — create an actual separate file
 
 ## ⚠️ NAVIGATION RULES (critical — preview will break if violated)
-- ALL nav links MUST use <a href="#sectionId"> or <a href="page.html"> — NEVER window.location
+- ALL nav links MUST be plain <a href="#sectionId"> or <a href="page.html"> — NEVER window.location
 - NEVER use onclick="window.location.href='...'" or onclick="location.href='...'"
-- Hamburger menu JS: only toggles visibility — never sets window.location or location.href
+- NEVER add showPage(), switchPage(), navigateTo() or any SPA-style JS that toggles display:none on page divs. If the user asks for a new "page", create a real separate .html file. If they want a section, use <section id="x"> + <a href="#x">.
+- Hamburger menu JS: only toggles visibility of the menu container — never sets window.location or location.href
 
 ## RESPONSE
 One sentence describing the change, then your patch or file block(s).`

@@ -408,27 +408,63 @@ export default function EditorPage() {
       return
     }
 
-    // Step 1: Persist restored content to DB FIRST (source of truth).
-    // We match by path (more reliable than id, since file objects in snapshot may have stale ids).
-    const saves = storedList
-      .map(stored => {
-        const current = filesRef.current.find(f => f.id === stored.id || f.path === stored.path)
-        if (!current) return null
-        return fetch(`/api/builder/files/${projectId}/${current.id}`, {
+    console.log('[Revert] Starting revert. Snapshot files:', storedList.length, 'Current files:', filesRef.current.length)
+
+    // Step 1: Persist restored content to DB FIRST. Match by path (more reliable than id).
+    type SaveAttempt = { path: string; res: Response | null; error?: string }
+    const saveAttempts: SaveAttempt[] = []
+
+    for (const stored of storedList) {
+      const current = filesRef.current.find(f => f.id === stored.id || f.path === stored.path)
+      if (!current) {
+        saveAttempts.push({ path: stored.path, res: null, error: 'file not in current state' })
+        console.warn('[Revert] Stored file not found in current state:', stored.path)
+        continue
+      }
+      try {
+        const res = await fetch(`/api/builder/files/${projectId}/${current.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: stored.content }),
         })
-      })
-      .filter((p): p is Promise<Response> => p !== null)
-
-    const results = await Promise.all(saves)
-    const failedSaves = results.filter(r => !r.ok).length
-    if (failedSaves > 0) {
-      console.error('[Revert] Some file saves failed:', failedSaves)
+        if (!res.ok) {
+          let errBody = ''
+          try { const j = await res.json(); errBody = j.error ?? '' } catch {}
+          console.error('[Revert] PATCH failed for', stored.path, 'status:', res.status, 'error:', errBody)
+          saveAttempts.push({ path: stored.path, res, error: `${res.status} ${errBody}` })
+        } else {
+          console.log('[Revert] Saved', stored.path)
+          saveAttempts.push({ path: stored.path, res })
+        }
+      } catch (err) {
+        console.error('[Revert] Network error for', stored.path, err)
+        saveAttempts.push({ path: stored.path, res: null, error: err instanceof Error ? err.message : 'network error' })
+      }
     }
 
-    // Step 2: Reload files from DB (single source of truth — don't trust local state)
+    const failed = saveAttempts.filter(a => a.error)
+    if (failed.length === saveAttempts.length) {
+      // ALL saves failed — abort, don't update UI optimistically
+      const details = failed.slice(0, 3).map(f => `${f.path}: ${f.error}`).join('; ')
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+        content: `❌ Revert failed — none of the files could be saved to the database. ${details}. Try refreshing the page (Cmd+Shift+R) and retry.`,
+        affected_file_ids: null, input_tokens: null, output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
+      return
+    }
+    if (failed.length > 0) {
+      // Some saves failed — warn but continue
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+        content: `⚠️ Revert partially completed — ${failed.length} of ${saveAttempts.length} file(s) couldn't be saved.`,
+        affected_file_ids: null, input_tokens: null, output_tokens: null,
+        created_at: new Date().toISOString(),
+      }])
+    }
+
+    // Step 2: Reload files from DB (single source of truth — confirms what was saved)
     const freshRes = await fetch(`/api/builder/files/${projectId}`)
     if (freshRes.ok) {
       const freshFiles: BuilderFile[] = await freshRes.json()
@@ -446,6 +482,13 @@ export default function EditorPage() {
     // Step 3: Remove this snapshot and newer ones from DB + local state
     await fetch(`/api/builder/snapshots/${projectId}/${snap.id}`, { method: 'DELETE' })
     setSnapshots(prev => prev.filter(s => new Date(s.created_at) < new Date(snap.created_at)))
+
+    setMessages(prev => [...prev, {
+      id: crypto.randomUUID(), project_id: projectId, org_id: '', role: 'assistant' as const,
+      content: `✓ Reverted to: "${snap.label}"`,
+      affected_file_ids: null, input_tokens: null, output_tokens: null,
+      created_at: new Date().toISOString(),
+    }])
   }
 
   async function saveFileContent(content: string) {
@@ -1040,17 +1083,19 @@ export default function EditorPage() {
 
           {/* Preview iframe or Code Editor */}
           {viewMode === 'preview' ? (
-            <div className="flex-1 overflow-auto bg-[#111118] flex items-start justify-center">
-              {/* Always keep the iframe in the same tree position to prevent remount on device switch.
-                  Only the wrapper div's style changes — desktop: full size, tablet/mobile: fixed width frame */}
+            <div className="flex-1 overflow-auto bg-[#111118] p-4">
+              {/* Stable wrapper — className NEVER changes, only style.width transitions.
+                  Iframe stays mounted with src intact across all device-size changes.
+                  bg-[#111118] (matches parent) prevents the white flash some browsers show
+                  during iframe re-layout when its containing block resizes. */}
               <div
-                className={devicePx ? 'flex-shrink-0 mt-4 mb-4 rounded-2xl overflow-hidden shadow-2xl border border-white/10' : 'w-full h-full flex flex-col'}
-                style={devicePx ? { width: devicePx, height: 'calc(100% - 2rem)' } : { width: '100%', height: '100%' }}
+                className="mx-auto bg-[#111118] shadow-2xl rounded-lg overflow-hidden h-full transition-[max-width] duration-200 ease-out"
+                style={{ maxWidth: devicePx ? `${devicePx}px` : '100%' }}
               >
                 <iframe
                   ref={iframeRef}
                   sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-                  className="w-full h-full border-none bg-white"
+                  className="w-full h-full border-none block"
                   title="preview"
                 />
               </div>
